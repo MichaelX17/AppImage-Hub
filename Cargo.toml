@@ -1,0 +1,47 @@
+[package]
+name = "appimage-manager"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# GUI
+eframe = "0.31"
+egui = "0.31"
+egui_extras = { version = "0.31", features = ["all_loaders"] }
+
+# Async runtime & HTTP
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["stream"] }
+octocrab = "0.43"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+futures-util = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Downloads (purpose-built for Rust GUIs; publishes progress via watch channel)
+async_downloader = { version = "0.1", features = ["egui"] }
+
+# XDG integration
+dirs = "5"
+
+# File picker (native KDE integration)
+rfd = "0.15"
+
+# Errors & logging
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Misc
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+
+[profile.dev]
+debug = 1        # line tables only (smaller/faster than full 2)
+incremental = true
+
+[profile.dev.package."*"]
+debug = 0        # no debug info for dependencies

@@ -1,0 +1,126 @@
+use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, Stroke, Style, Visuals};
+
+pub const BG: Color32 = Color32::from_rgb(23, 24, 33);
+pub const SURFACE: Color32 = Color32::from_rgb(34, 36, 49);
+pub const SURFACE_RAISED: Color32 = Color32::from_rgb(41, 43, 58);
+pub const SURFACE_HOVER: Color32 = Color32::from_rgb(52, 54, 74);
+pub const BORDER: Color32 = Color32::from_rgb(65, 67, 87);
+
+pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(241, 240, 247);
+pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(181, 181, 197);
+pub const TEXT_MUTED: Color32 = Color32::from_rgb(133, 134, 151);
+
+pub const ACCENT: Color32 = Color32::from_rgb(124, 58, 237);
+pub const ACCENT_HOVER: Color32 = Color32::from_rgb(145, 92, 244);
+#[allow(dead_code)]
+pub const SUCCESS: Color32 = Color32::from_rgb(74, 222, 128);
+pub const DANGER: Color32 = Color32::from_rgb(217, 65, 65);
+pub const NEUTRAL: Color32 = Color32::from_rgb(72, 74, 92);
+#[allow(dead_code)]
+pub const NEUTRAL_HOVER: Color32 = Color32::from_rgb(88, 90, 112);
+
+#[allow(dead_code)]
+pub const RADIUS_SM: u8 = 6;
+pub const RADIUS_MD: u8 = 10;
+pub const RADIUS_LG: u8 = 12;
+
+pub const SPACE_XS: f32 = 4.0;
+#[allow(dead_code)]
+pub const SPACE_SM: f32 = 8.0;
+#[allow(dead_code)]
+pub const SPACE_MD: f32 = 12.0;
+pub const SPACE_LG: f32 = 16.0;
+
+pub fn apply(ctx: &egui::Context) {
+    let mut visuals = Visuals::dark();
+    visuals.override_text_color = Some(TEXT_PRIMARY);
+    visuals.panel_fill = BG;
+    visuals.window_fill = BG;
+    visuals.extreme_bg_color = SURFACE_RAISED;
+    visuals.faint_bg_color = SURFACE;
+    visuals.widgets.noninteractive.bg_fill = BG;
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT_SECONDARY);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, BORDER);
+    visuals.widgets.inactive.bg_fill = SURFACE_RAISED;
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, BORDER);
+    visuals.widgets.hovered.bg_fill = SURFACE_HOVER;
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ACCENT_HOVER);
+    visuals.widgets.active.bg_fill = ACCENT;
+    visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, ACCENT_HOVER);
+    visuals.widgets.open.bg_fill = SURFACE_RAISED;
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, BORDER);
+    visuals.selection.bg_fill = ACCENT;
+    visuals.selection.stroke = Stroke::new(1.0_f32, Color32::WHITE);
+    visuals.hyperlink_color = ACCENT_HOVER;
+
+    let rounding = CornerRadius::same(RADIUS_MD);
+    for w in [
+        &mut visuals.widgets.noninteractive,
+        &mut visuals.widgets.inactive,
+        &mut visuals.widgets.hovered,
+        &mut visuals.widgets.active,
+        &mut visuals.widgets.open,
+    ] {
+        w.corner_radius = rounding;
+    }
+
+    let mut style = Style {
+        visuals,
+        ..Default::default()
+    };
+    style.spacing.item_spacing = egui::vec2(SPACE_SM, SPACE_SM);
+    style.spacing.button_padding = egui::vec2(12.0, 6.0);
+    style.spacing.interact_size.y = 30.0;
+    ctx.set_style(style);
+}
+
+pub fn card_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(SURFACE)
+        .stroke(Stroke::new(1.0_f32, BORDER))
+        .corner_radius(CornerRadius::same(RADIUS_LG))
+        .inner_margin(Margin::same(SPACE_LG as i8))
+}
+
+#[allow(dead_code)]
+pub fn panel_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(SURFACE)
+        .stroke(Stroke::new(1.0_f32, BORDER))
+        .inner_margin(Margin::same(SPACE_LG as i8))
+}
+
+pub fn primary_button(text: impl Into<String>) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(text.into()).color(Color32::WHITE).strong()).fill(ACCENT)
+}
+
+pub fn secondary_button(text: impl Into<String>) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(text.into()).color(TEXT_PRIMARY)).fill(NEUTRAL)
+}
+
+pub fn danger_button(text: impl Into<String>) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(text.into()).color(Color32::WHITE)).fill(DANGER)
+}
+
+pub fn ghost_button(text: impl Into<String>) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(text.into()).color(TEXT_SECONDARY)).fill(SURFACE_RAISED)
+}
+
+#[allow(dead_code)]
+pub fn status_dot(ui: &mut egui::Ui, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 4.0, color);
+}
+
+#[allow(dead_code)]
+pub fn muted_label(text: impl Into<String>) -> RichText {
+    RichText::new(text.into()).color(TEXT_MUTED)
+}
+
+pub fn secondary_label(text: impl Into<String>) -> RichText {
+    RichText::new(text.into()).color(TEXT_SECONDARY)
+}
