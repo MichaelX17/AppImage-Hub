@@ -895,20 +895,25 @@ impl eframe::App for ManagerApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.horizontal(|ui| {
-                        let (rect, _) =
-                            ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
-                        let r = rect.shrink(3.0);
-                        ui.painter().rect_filled(
-                            r,
-                            egui::CornerRadius::same(6),
-                            crate::ui::theme::ACCENT,
-                        );
-                        ui.painter().rect_stroke(
-                            r.shrink(5.0),
-                            egui::CornerRadius::same(3),
-                            egui::Stroke::new(2.0_f32, eframe::egui::Color32::WHITE),
-                            egui::StrokeKind::Inside,
-                        );
+                        let avail = ui.available_size();
+                        if avail.x.is_finite() && avail.y.is_finite() && avail.x >= 28.0 && avail.y >= 28.0 {
+                            let (rect, _) =
+                                ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
+                            if rect.is_finite() && rect.width() > 0.0 && rect.height() > 0.0 {
+                                let r = rect.shrink(3.0);
+                                ui.painter().rect_filled(
+                                    r,
+                                    egui::CornerRadius::same(6),
+                                    crate::ui::theme::ACCENT,
+                                );
+                                ui.painter().rect_stroke(
+                                    r.shrink(5.0),
+                                    egui::CornerRadius::same(3),
+                                    egui::Stroke::new(2.0_f32, eframe::egui::Color32::WHITE),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                        }
                         ui.add_space(6.0);
                         ui.label(RichText::new("AppImage Hub").size(22.0).strong());
                     });
@@ -991,6 +996,11 @@ impl eframe::App for ManagerApp {
 
         if self.is_right_panel_open() {
             let available = ctx.screen_rect().width();
+            let available = if available.is_finite() && available > 0.0 {
+                available
+            } else {
+                800.0
+            };
             let desired = (available * 0.37).clamp(360.0, 520.0);
             let min_list = 360.0;
             let panel_width = if available - desired < min_list {
@@ -998,6 +1008,7 @@ impl eframe::App for ManagerApp {
             } else {
                 desired
             };
+            let panel_width = if panel_width.is_finite() && panel_width > 0.0 { panel_width } else { 360.0 };
             egui::SidePanel::right("editor_panel")
                 .resizable(false)
                 .exact_width(panel_width)

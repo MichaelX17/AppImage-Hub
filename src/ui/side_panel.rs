@@ -45,11 +45,16 @@ pub fn render(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
         .inner_margin(Margin::same(theme::SPACE_LG as i8));
 
     panel_frame.show(ui, |ui| {
-        let rail_rect = egui::Rect::from_min_max(
-            ui.max_rect().left_top(),
-            egui::pos2(ui.max_rect().left() + 3.0 - 10.0, ui.max_rect().bottom()),
-        );
-        ui.painter().rect_filled(rail_rect, 0.0, theme::ACCENT);
+        let max = ui.max_rect();
+        if max.is_finite() && max.width() > 0.0 && max.height() > 0.0 {
+            let rail_rect = egui::Rect::from_min_max(
+                max.left_top() + egui::vec2(-10.0, 0.0),
+                egui::pos2(max.left() - 7.0, max.bottom()),
+            );
+            if rail_rect.is_finite() && rail_rect.is_positive() {
+                ui.painter().rect_filled(rail_rect, 0.0, theme::ACCENT);
+            }
+        }
 
         ui.horizontal(|ui| {
             ui.label(
@@ -76,6 +81,7 @@ pub fn render(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
 
         let footer_height = 44.0;
         let available = ui.available_height();
+        let available = if available.is_finite() { available } else { 300.0 };
         let form_height = (available - footer_height - theme::SPACE_SM).max(120.0);
 
         egui::ScrollArea::vertical()
@@ -123,11 +129,16 @@ pub fn render_add_to(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
         .inner_margin(Margin::same(theme::SPACE_LG as i8));
 
     panel_frame.show(ui, |ui| {
-        let rail_rect = egui::Rect::from_min_max(
-            ui.max_rect().left_top(),
-            egui::pos2(ui.max_rect().left() + 3.0 - 10.0, ui.max_rect().bottom()),
-        );
-        ui.painter().rect_filled(rail_rect, 0.0, theme::ACCENT);
+        let max = ui.max_rect();
+        if max.is_finite() && max.width() > 0.0 && max.height() > 0.0 {
+            let rail_rect = egui::Rect::from_min_max(
+                max.left_top() + egui::vec2(-10.0, 0.0),
+                egui::pos2(max.left() - 7.0, max.bottom()),
+            );
+            if rail_rect.is_finite() && rail_rect.is_positive() {
+                ui.painter().rect_filled(rail_rect, 0.0, theme::ACCENT);
+            }
+        }
 
         ui.horizontal(|ui| {
             ui.label(RichText::new("+").size(18.0).color(theme::ACCENT_HOVER));
@@ -225,7 +236,7 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
     ui.add(
         egui::TextEdit::singleline(&mut mgr.side_panel_form.display_name)
             .hint_text("Application name")
-            .desired_width(f32::INFINITY),
+            .desired_width({ let w = ui.available_width(); if w.is_finite() { w.max(80.0) } else { 240.0 } }),
     );
     ui.add_space(theme::SPACE_MD);
 
@@ -266,6 +277,8 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
                 let browse_w = 80.0;
                 let path_editable =
                     needs_local_path && mgr.side_panel_form.editing_app_id.is_none();
+                let w = ui.available_width();
+                let w = if w.is_finite() { w } else { 240.0 };
                 ui.add_enabled(
                     path_editable,
                     egui::TextEdit::singleline(&mut mgr.side_panel_form.local_path)
@@ -274,7 +287,7 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
                         } else {
                             "Managed after install"
                         })
-                        .desired_width((ui.available_width() - browse_w - 8.0).max(80.0)),
+                        .desired_width((w - browse_w - 8.0).max(80.0)),
                 );
                 if ui
                     .add_enabled(path_editable, theme::secondary_button("Browse"))
@@ -305,10 +318,12 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
     ui.label(RichText::new("Icon Path (optional)").strong());
     ui.horizontal(|ui| {
         let browse_w = 80.0;
+        let w = ui.available_width();
+        let w = if w.is_finite() { w } else { 240.0 };
         ui.add(
             egui::TextEdit::singleline(&mut mgr.side_panel_form.icon_path)
                 .hint_text("Optional icon file")
-                .desired_width((ui.available_width() - browse_w - 8.0).max(80.0)),
+                .desired_width((w - browse_w - 8.0).max(80.0)),
         );
         if ui.add(theme::secondary_button("Browse")).clicked() {
             if let Some(p) = rfd::FileDialog::new()
@@ -328,7 +343,7 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
             ui.add(
                 egui::TextEdit::singleline(&mut mgr.side_panel_form.github_url)
                     .hint_text("owner/repo or https://github.com/owner/repo")
-                    .desired_width(f32::INFINITY),
+                    .desired_width({ let w = ui.available_width(); if w.is_finite() { w.max(80.0) } else { 240.0 } }),
             );
             if !needs_repo {
                 ui.label(theme::muted_label("Optional for local-only entries.").small());
@@ -341,7 +356,7 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
     ui.add(
         egui::TextEdit::singleline(&mut mgr.side_panel_form.launch_args)
             .hint_text("Optional arguments")
-            .desired_width(f32::INFINITY),
+            .desired_width({ let w = ui.available_width(); if w.is_finite() { w.max(80.0) } else { 240.0 } }),
     );
     ui.add_space(theme::SPACE_SM);
 

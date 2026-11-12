@@ -112,8 +112,14 @@ pub fn ghost_button(text: impl Into<String>) -> egui::Button<'static> {
 
 #[allow(dead_code)]
 pub fn status_dot(ui: &mut egui::Ui, color: Color32) {
+    let avail = ui.available_size();
+    if !avail.x.is_finite() || !avail.y.is_finite() || avail.x < 8.0 || avail.y < 8.0 {
+        return;
+    }
     let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-    ui.painter().circle_filled(rect.center(), 4.0, color);
+    if rect.is_finite() && rect.width() > 0.0 && rect.height() > 0.0 {
+        ui.painter().circle_filled(rect.center(), 4.0, color);
+    }
 }
 
 #[allow(dead_code)]

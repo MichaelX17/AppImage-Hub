@@ -74,88 +74,99 @@ fn render_app_card(ui: &mut egui::Ui, mgr: &mut ManagerApp, app: &AppEntry) {
 
     theme::card_frame().show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.set_min_height(84.0);
             render_icon(ui, app, 76.0);
             ui.add_space(theme::SPACE_LG);
 
             let actions_width = if downloading.is_some() || failed_msg.is_some() {
                 280.0
-            } else if has_update {
-                470.0
             } else {
-                410.0
+                420.0
             };
-            let info_width = (ui.available_width() - actions_width - theme::SPACE_MD).max(160.0);
+            let avail_w = ui.available_width();
+            let avail_w = if avail_w.is_finite() {
+                avail_w
+            } else {
+                actions_width + 240.0
+            };
+            let info_width = (avail_w - actions_width - theme::SPACE_MD).max(120.0);
+            let info_width = if info_width.is_finite() {
+                info_width.max(120.0)
+            } else {
+                200.0
+            };
 
-            ui.allocate_ui_with_layout(
-                Vec2::new(info_width, ui.available_height().max(84.0)),
-                Layout::top_down(Align::Min),
-                |ui| {
+            ui.vertical(|ui| {
+                ui.set_max_width(info_width);
+                ui.add(
+                    egui::Label::new(RichText::new(&app.display_name).strong().size(18.0))
+                        .truncate(),
+                );
+
+                if let Some(source) = source_text(app) {
                     ui.add(
-                        egui::Label::new(RichText::new(&app.display_name).strong().size(18.0))
+                        egui::Label::new(theme::secondary_label(source.clone()).small())
                             .truncate(),
-                    );
+                    )
+                    .on_hover_text(source);
+                }
 
-                    if let Some(source) = source_text(app) {
-                        ui.add(
-                            egui::Label::new(theme::secondary_label(source.clone()).small())
-                                .truncate(),
-                        )
-                        .on_hover_text(source);
-                    }
+                ui.add_space(theme::SPACE_XS);
+                let current = if app.current_version.trim().is_empty() {
+                    "unknown"
+                } else {
+                    app.current_version.as_str()
+                };
+                ui.label(theme::secondary_label(format!("Current: {}", current)));
 
-                    ui.add_space(theme::SPACE_XS);
-                    let current = if app.current_version.trim().is_empty() {
-                        "unknown"
-                    } else {
-                        app.current_version.as_str()
-                    };
-                    ui.label(theme::secondary_label(format!("Current: {}", current)));
-
-                    let latest_known = latest_tag
-                        .as_deref()
-                        .or_else(|| {
-                            mgr.latest_versions
-                                .get(&app.id)
-                                .map(|s| s.as_str())
-                        })
-                        .or_else(|| {
-                            if app.current_version.trim().is_empty() {
-                                None
-                            } else {
-                                Some(current)
-                            }
-                        });
-                    match latest_known {
-                        Some(tag) => {
-                            if has_update {
-                                ui.horizontal(|ui| {
-                                    theme::status_dot(ui, theme::ACCENT_HOVER);
-                                    ui.add_space(4.0);
-                                    ui.label(
-                                        RichText::new(format!("Latest: {} (update available)", tag))
-                                            .strong()
-                                            .color(theme::ACCENT_HOVER),
-                                    );
-                                });
-                            } else {
-                                ui.label(theme::secondary_label(format!("Latest: {}", tag)));
-                            }
+                let latest_known = latest_tag
+                    .as_deref()
+                    .or_else(|| mgr.latest_versions.get(&app.id).map(|s| s.as_str()))
+                    .or_else(|| {
+                        if app.current_version.trim().is_empty() {
+                            None
+                        } else {
+                            Some(current)
                         }
-                        None => {
-                            ui.label(theme::muted_label("Latest: —"));
+                    });
+                match latest_known {
+                    Some(tag) => {
+                        if has_update {
+                            ui.horizontal(|ui| {
+                                theme::status_dot(ui, theme::ACCENT_HOVER);
+                                ui.add_space(4.0);
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Latest: {} (update available)",
+                                        tag
+                                    ))
+                                    .strong()
+                                    .color(theme::ACCENT_HOVER),
+                                );
+                            });
+                        } else {
+                            ui.label(theme::secondary_label(format!("Latest: {}", tag)));
                         }
                     }
-                },
-            );
+                    None => {
+                        ui.label(theme::muted_label("Latest: —"));
+                    }
+                }
+            });
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if let Some((op_id, fraction, downloaded, total, started_at)) = &downloading {
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(actions_width.min(ui.available_width().max(200.0)), 80.0),
-                        Layout::top_down(Align::Max),
-                        |ui| {
-                            let pb = egui::ProgressBar::new((*fraction).clamp(0.0, 1.0))
+                    let w = ui.available_width();
+                    let panel_w = if w.is_finite() { w } else { actions_width };
+                    let panel_w = actions_width.min(panel_w).max(200.0);
+                    ui.vertical(|ui| {
+                        ui.set_max_width(panel_w);
+                        ui.with_layout(Layout::top_down(Align::Max), |ui| {
+                            let fraction = if (*fraction).is_finite() {
+                                (*fraction).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            let pb = egui::ProgressBar::new(fraction)
                                 .show_percentage()
                                 .fill(theme::ACCENT);
                             ui.add(pb);
@@ -174,13 +185,15 @@ fn render_app_card(ui: &mut egui::Ui, mgr: &mut ManagerApp, app: &AppEntry) {
                             if ui.add(theme::secondary_button("Cancel")).clicked() {
                                 cancel_op_id = Some(op_id.clone());
                             }
-                        },
-                    );
+                        });
+                    });
                 } else if let Some((msg, can_retry)) = &failed_msg {
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(actions_width.min(ui.available_width().max(200.0)), 80.0),
-                        Layout::top_down(Align::Max),
-                        |ui| {
+                    let w = ui.available_width();
+                    let panel_w = if w.is_finite() { w } else { actions_width };
+                    let panel_w = actions_width.min(panel_w).max(200.0);
+                    ui.vertical(|ui| {
+                        ui.set_max_width(panel_w);
+                        ui.with_layout(Layout::top_down(Align::Max), |ui| {
                             ui.add(
                                 egui::Label::new(RichText::new(msg).color(theme::DANGER).small())
                                     .truncate(),
@@ -192,30 +205,55 @@ fn render_app_card(ui: &mut egui::Ui, mgr: &mut ManagerApp, app: &AppEntry) {
                             {
                                 retry_app = true;
                             }
-                        },
-                    );
+                        });
+                    });
                 } else {
-                    ui.horizontal_wrapped(|ui| {
-                        if ui.add(theme::danger_button("Delete")).clicked() {
-                            delete_clicked = true;
-                        }
-                        if ui.add(theme::secondary_button("Edit")).clicked() {
-                            edit_clicked = true;
-                        }
-                        if ui.add(theme::ghost_button("Show in Folder")).clicked() {
-                            show_folder_clicked = true;
-                        }
-                        if ui.add(theme::ghost_button("Add to..")).clicked() {
-                            add_to_clicked = true;
-                        }
-                        if has_update {
-                            if ui.add(theme::ghost_button("Update")).clicked() {
+                    let button_size = Vec2::new(130.0, 30.0);
+                    ui.with_layout(Layout::top_down(Align::Max), |ui| {
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            if ui
+                                .add_sized(button_size, theme::danger_button("Delete"))
+                                .clicked()
+                            {
+                                delete_clicked = true;
+                            }
+                            if ui
+                                .add_sized(button_size, theme::secondary_button("Edit"))
+                                .clicked()
+                            {
+                                edit_clicked = true;
+                            }
+                            if ui
+                                .add_sized(button_size, theme::ghost_button("Show in Folder"))
+                                .clicked()
+                            {
+                                show_folder_clicked = true;
+                            }
+                        });
+                        ui.add_space(theme::SPACE_SM);
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            if ui
+                                .add_sized(button_size, theme::ghost_button("Add to.."))
+                                .clicked()
+                            {
+                                add_to_clicked = true;
+                            }
+                            if ui
+                                .add_enabled_ui(has_update, |ui| {
+                                    ui.add_sized(button_size, theme::ghost_button("Update"))
+                                })
+                                .inner
+                                .clicked()
+                            {
                                 update_clicked = true;
                             }
-                        }
-                        if ui.add(theme::primary_button("Launch")).clicked() {
-                            launch_clicked = true;
-                        }
+                            if ui
+                                .add_sized(button_size, theme::primary_button("Launch"))
+                                .clicked()
+                            {
+                                launch_clicked = true;
+                            }
+                        });
                     });
                 }
             });
@@ -264,7 +302,22 @@ fn source_text(app: &AppEntry) -> Option<String> {
 }
 
 fn render_icon(ui: &mut egui::Ui, app: &AppEntry, size: f32) {
+    let size = if size.is_finite() && size > 0.0 {
+        size.clamp(1.0, 256.0)
+    } else {
+        76.0
+    };
+
+    let avail = ui.available_size();
+    if !avail.x.is_finite() || !avail.y.is_finite() {
+        return;
+    }
+
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    if !rect.is_finite() || rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return;
+    }
+
     let rounding = egui::CornerRadius::same(theme::RADIUS_MD);
     ui.painter()
         .rect_filled(rect, rounding, theme::SURFACE_RAISED);
@@ -279,8 +332,11 @@ fn render_icon(ui: &mut egui::Ui, app: &AppEntry, size: f32) {
         if path.exists() {
             let uri = format!("file://{}", path.display());
             let image = egui::Image::new(uri).corner_radius(rounding);
-            ui.put(rect.shrink(6.0), image);
-            return;
+            let inner = rect.shrink(6.0);
+            if inner.is_finite() && inner.width() > 1.0 && inner.height() > 1.0 {
+                ui.put(inner, image);
+                return;
+            }
         }
     }
 
@@ -296,7 +352,7 @@ fn render_icon(ui: &mut egui::Ui, app: &AppEntry, size: f32) {
         rect.center(),
         egui::Align2::CENTER_CENTER,
         initial,
-        egui::FontId::proportional(size * 0.42),
+        egui::FontId::proportional((size * 0.42).max(1.0)),
         theme::ACCENT_HOVER,
     );
 }

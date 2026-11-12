@@ -35,7 +35,10 @@ pub fn render(ctx: &egui::Context, mgr: &mut ManagerApp) {
                 let mut cancel_id: Option<String> = None;
                 for op in &ops {
                     ui.group(|ui| {
-                        ui.set_width(ui.available_width());
+                        let w = ui.available_width();
+                        if w.is_finite() && w > 0.0 {
+                            ui.set_width(w);
+                        }
                         ui.horizontal(|ui| {
                             let kind = match op.kind {
                                 OpKind::Install => "Installing",
@@ -52,7 +55,12 @@ pub fn render(ctx: &egui::Context, mgr: &mut ManagerApp) {
                                 }
                             });
                         });
-                        let pb = egui::ProgressBar::new(op.fraction.clamp(0.0, 1.0))
+                        let fraction = if op.fraction.is_finite() {
+                            op.fraction.clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        };
+                        let pb = egui::ProgressBar::new(fraction)
                             .show_percentage()
                             .fill(theme::ACCENT);
                         ui.add(pb);
@@ -91,7 +99,10 @@ pub fn render(ctx: &egui::Context, mgr: &mut ManagerApp) {
                 let mut to_dismiss: Option<usize> = None;
                 for (i, f) in mgr.failed_ops.iter().enumerate() {
                     ui.group(|ui| {
-                        ui.set_width(ui.available_width());
+                        let w = ui.available_width();
+                        if w.is_finite() && w > 0.0 {
+                            ui.set_width(w);
+                        }
                         ui.label(
                             RichText::new(format!("{}: {}", f.label, f.message))
                                 .color(theme::DANGER),
