@@ -21,6 +21,18 @@ pub struct AppEntry {
     pub args: Vec<String>, // custom launch args
     #[serde(default)]
     pub icon_path: Option<PathBuf>,
+    #[serde(default)]
+    pub generic_name: Option<String>,
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub categories: Option<String>,
+    #[serde(default = "default_startup_notify")]
+    pub startup_notify: bool,
+}
+
+fn default_startup_notify() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

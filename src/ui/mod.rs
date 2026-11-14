@@ -1,5 +1,7 @@
 pub mod app_list;
+pub mod breakpoints;
 pub mod confirm_dialog;
+pub mod format;
 pub mod side_panel;
 pub mod theme;
 pub mod update_state;

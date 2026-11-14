@@ -44,15 +44,51 @@ pub fn legacy_id_filename(app_id: &str) -> String {
 
 pub fn desktop_file_content(app: &AppEntry) -> String {
     let exec = build_exec(app);
+    let categories = app
+        .categories
+        .as_deref()
+        .map(|c| c.trim())
+        .filter(|c| !c.is_empty())
+        .map(|c| {
+            if c.ends_with(';') {
+                c.to_string()
+            } else {
+                format!("{c};")
+            }
+        })
+        .unwrap_or_else(|| "Utility;".to_string());
+
     let mut content = format!(
         "[Desktop Entry]\n\
          Type=Application\n\
-         Name={}\n\
-         Exec={}\n\
-         Terminal=false\n\
-         Categories=Utility;\n",
-        app.display_name, exec,
+         Name={}\n",
+        app.display_name,
     );
+
+    if let Some(generic) = &app.generic_name {
+        let g = generic.trim();
+        if !g.is_empty() {
+            content.push_str(&format!("GenericName={g}\n"));
+        }
+    }
+
+    if let Some(comment) = &app.comment {
+        let c = comment.trim();
+        if !c.is_empty() {
+            content.push_str(&format!("Comment={c}\n"));
+        }
+    }
+
+    content.push_str(&format!(
+        "Exec={}\n\
+         Terminal=false\n\
+         StartupNotify={}\n\
+         Categories={}\n",
+        exec,
+        if app.startup_notify { "true" } else { "false" },
+        categories,
+    ));
+
     if let Some(icon) = &app.icon_path {
         let icon = icon.to_string_lossy();
         if !icon.trim().is_empty() {
@@ -213,7 +249,26 @@ mod tests {
             current_version: String::new(),
             args,
             icon_path: None,
+            generic_name: None,
+            comment: None,
+            categories: None,
+            startup_notify: true,
         }
+    }
+
+    #[test]
+    fn desktop_file_content_includes_kde_metadata() {
+        let mut app = sample_app(vec![]);
+        app.generic_name = Some("PlayStation 2 Emulator".into());
+        app.comment = Some("Sony PS2 Emulator".into());
+        app.categories = Some("Game;Emulator;".into());
+        app.startup_notify = true;
+        let content = desktop_file_content(&app);
+        assert!(content.contains("Name=Test App\n"));
+        assert!(content.contains("GenericName=PlayStation 2 Emulator\n"));
+        assert!(content.contains("Comment=Sony PS2 Emulator\n"));
+        assert!(content.contains("Categories=Game;Emulator;\n"));
+        assert!(content.contains("StartupNotify=true\n"));
     }
 
     #[test]

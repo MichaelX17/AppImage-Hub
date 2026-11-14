@@ -10,6 +10,9 @@ mod xdg;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_inner_size([1270.0, 802.0])
+            .with_min_inner_size([480.0, 360.0]),
         persistence_path: Some(
             dirs::config_dir()
                 .unwrap_or_else(|| std::env::current_dir().unwrap())

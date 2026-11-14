@@ -4,6 +4,7 @@ use crate::downloader;
 use crate::github;
 use crate::launcher;
 use crate::permissions;
+use crate::ui::breakpoints::SizeClass;
 use crate::xdg;
 use eframe::egui::{self, RichText};
 use std::collections::HashMap;
@@ -157,6 +158,9 @@ pub struct ManagerApp {
     pub(crate) is_form_open: bool,
     pub(crate) side_panel_form: crate::ui::side_panel::SidePanelFormState,
     pub(crate) add_to: Option<AddToState>,
+    pub(crate) side_panel_width: f32,
+    pub(crate) show_side_panel: bool,
+    pub(crate) compact_mode: bool,
 }
 
 pub fn setup_custom_style(ctx: &egui::Context) {
@@ -174,6 +178,20 @@ impl ManagerApp {
             Config::default()
         })));
 
+        let side_panel_width = cc
+            .storage
+            .and_then(|s| s.get_string("side_panel_width"))
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(420.0)
+            .clamp(360.0, 520.0);
+        let show_side_panel = true;
+        let is_form_open = true;
+        let compact_mode = cc
+            .storage
+            .and_then(|s| s.get_string("compact_mode"))
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
         let (cmd_tx, cmd_rx) = mpsc::channel::<BackendCommand>(64);
         let (evt_tx, evt_rx) = mpsc::channel::<BackendEvent>(256);
         spawn_backend(config.clone(), cmd_rx, evt_tx);
@@ -188,9 +206,12 @@ impl ManagerApp {
             pending_delete: None,
             update_available: HashMap::new(),
             latest_versions: HashMap::new(),
-            is_form_open: false,
+            is_form_open,
             side_panel_form: crate::ui::side_panel::SidePanelFormState::default(),
             add_to: None,
+            side_panel_width,
+            show_side_panel,
+            compact_mode,
         }
     }
 
@@ -448,6 +469,7 @@ impl ManagerApp {
         self.side_panel_form.clear();
         self.status = None;
         self.is_form_open = true;
+        self.show_side_panel = true;
     }
 
     fn push_entry(&mut self, entry: AppEntry) {
@@ -470,10 +492,30 @@ impl ManagerApp {
             }
         };
 
+        let cat_str = entry
+            .categories
+            .as_deref()
+            .map(|c| c.trim_end_matches(';').trim())
+            .filter(|c| !c.is_empty())
+            .unwrap_or("Utility");
+        let is_standard_cat = crate::ui::side_panel::KDE_CATEGORIES
+            .iter()
+            .any(|(_, val)| *val == cat_str);
+        let (category, custom_category) = if is_standard_cat {
+            (cat_str.to_string(), String::new())
+        } else {
+            ("Custom".to_string(), cat_str.to_string())
+        };
+
         self.add_to = None;
         self.side_panel_form = crate::ui::side_panel::SidePanelFormState {
             editing_app_id: Some(entry.id.clone()),
             display_name: entry.display_name.clone(),
+            generic_name: entry.generic_name.clone().unwrap_or_default(),
+            comment: entry.comment.clone().unwrap_or_default(),
+            category,
+            custom_category,
+            startup_notify: entry.startup_notify,
             mode,
             local_path: entry.local_path.display().to_string(),
             icon_path: entry
@@ -486,6 +528,7 @@ impl ManagerApp {
         };
         self.status = None;
         self.is_form_open = true;
+        self.show_side_panel = true;
     }
 
     pub(crate) fn retry_failed(&mut self, idx: usize) {
@@ -561,6 +604,7 @@ impl ManagerApp {
             menu,
         });
         self.status = None;
+        self.show_side_panel = true;
     }
 
     pub(crate) fn close_add_to(&mut self) {
@@ -660,6 +704,164 @@ impl ManagerApp {
         self.is_form_open || self.add_to.is_some()
     }
 
+    fn render_top_bar(&mut self, ui: &mut egui::Ui, size_class: SizeClass) {
+        let full_brand = "AppImage Hub";
+        let show_actions_inline = matches!(size_class, SizeClass::Large);
+        let tight = matches!(size_class, SizeClass::Tight);
+
+        ui.horizontal(|ui| {
+            let avail = ui.available_size();
+            if avail.x.is_finite() && avail.y.is_finite() && avail.x >= 28.0 && avail.y >= 28.0 {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
+                if rect.is_finite() && rect.width() > 0.0 && rect.height() > 0.0 {
+                    let r = rect.shrink(3.0);
+                    ui.painter().rect_filled(
+                        r,
+                        egui::CornerRadius::same(6),
+                        crate::ui::theme::ACCENT,
+                    );
+                    ui.painter().rect_stroke(
+                        r.shrink(5.0),
+                        egui::CornerRadius::same(3),
+                        egui::Stroke::new(2.0_f32, eframe::egui::Color32::WHITE),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
+            ui.add_space(6.0);
+            if tight {
+                ui.label(RichText::new("AIM").size(22.0).strong())
+                    .on_hover_text(full_brand);
+            } else {
+                ui.label(RichText::new(full_brand).size(22.0).strong());
+            }
+        });
+
+        let effective_download_dir = self
+            .config
+            .lock()
+            .ok()
+            .and_then(|c| c.custom_download_dir.clone())
+            .or_else(|| xdg::managed_apps_dir().ok());
+        let download_dir_text = effective_download_dir
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "unavailable".into());
+
+        if show_actions_inline {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let add_clicked = ui.add(crate::ui::theme::primary_button("Add")).clicked();
+                if add_clicked {
+                    self.open_add_form();
+                }
+
+                let updates_count = self.updates_available_count();
+                let has_active_downloads = !self.ops.is_empty();
+                let update_all_label = if updates_count > 0 {
+                    format!("Update All ({})", updates_count)
+                } else {
+                    "Update All".to_string()
+                };
+                let update_all_clicked = ui
+                    .add_enabled(
+                        !has_active_downloads && updates_count > 0,
+                        crate::ui::theme::ghost_button(update_all_label),
+                    )
+                    .on_disabled_hover_text(if has_active_downloads {
+                        "Wait for active downloads to finish"
+                    } else {
+                        "No updates available"
+                    })
+                    .clicked();
+                if update_all_clicked {
+                    self.update_all();
+                }
+
+                let check_clicked = ui
+                    .add(crate::ui::theme::secondary_button("Check All Updates"))
+                    .clicked();
+                if check_clicked {
+                    self.check_all_updates();
+                }
+
+                ui.add_space(4.0);
+                let browse_clicked = ui
+                    .add(crate::ui::theme::secondary_button("Browse"))
+                    .on_hover_text("Choose custom download folder for GitHub installs")
+                    .clicked();
+                if browse_clicked {
+                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                        if let Ok(mut cfg) = self.config.lock() {
+                            cfg.custom_download_dir = Some(p);
+                            let _ = cfg.save();
+                        }
+                    }
+                }
+
+                ui.checkbox(&mut self.compact_mode, "Compact");
+
+                ui.add(
+                    egui::Label::new(crate::ui::theme::secondary_label(download_dir_text.clone()))
+                        .truncate(),
+                )
+                .on_hover_text(download_dir_text.clone());
+            });
+        } else {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(crate::ui::theme::primary_button("Add")).clicked() {
+                    self.open_add_form();
+                }
+                ui.menu_button("Actions", |ui| {
+                    ui.label(crate::ui::theme::secondary_label("Download folder:").small());
+                    ui.add(
+                        egui::Label::new(crate::ui::theme::muted_label(download_dir_text.clone()))
+                            .truncate(),
+                    )
+                    .on_hover_text(download_dir_text.clone());
+                    ui.separator();
+                    let browse_clicked = ui.button("Browse download folder").clicked();
+                    if browse_clicked {
+                        if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                            if let Ok(mut cfg) = self.config.lock() {
+                                cfg.custom_download_dir = Some(p);
+                                let _ = cfg.save();
+                            }
+                        }
+                        ui.close_menu();
+                    }
+
+                    let check_clicked = ui.button("Check All Updates").clicked();
+                    if check_clicked {
+                        self.check_all_updates();
+                        ui.close_menu();
+                    }
+
+                    let updates_count = self.updates_available_count();
+                    let has_active_downloads = !self.ops.is_empty();
+                    let update_all_label = if updates_count > 0 {
+                        format!("Update All ({})", updates_count)
+                    } else {
+                        "Update All".to_string()
+                    };
+                    let update_all_clicked = ui
+                        .add_enabled(
+                            !has_active_downloads && updates_count > 0,
+                            egui::Button::new(update_all_label),
+                        )
+                        .clicked();
+                    if update_all_clicked {
+                        self.update_all();
+                        ui.close_menu();
+                    }
+
+                    ui.separator();
+                    ui.checkbox(&mut self.compact_mode, "Compact mode");
+                });
+            });
+        }
+    }
+
     pub(crate) fn check_all_updates(&mut self) {
         let ids: Vec<String> = self
             .config
@@ -721,6 +923,34 @@ impl ManagerApp {
             }
         };
 
+        let generic_name = {
+            let g = form.generic_name.trim();
+            if g.is_empty() {
+                None
+            } else {
+                Some(g.to_string())
+            }
+        };
+        let comment = {
+            let c = form.comment.trim();
+            if c.is_empty() {
+                None
+            } else {
+                Some(c.to_string())
+            }
+        };
+        let categories = {
+            let cat = form.effective_category();
+            if cat.is_empty() {
+                Some("Utility;".to_string())
+            } else if cat.ends_with(';') {
+                Some(cat)
+            } else {
+                Some(format!("{cat};"))
+            }
+        };
+        let startup_notify = form.startup_notify;
+
         if let Some(app_id) = form.editing_app_id.clone() {
             let mut old_entry: Option<AppEntry> = None;
             let mut updated: Option<AppEntry> = None;
@@ -728,6 +958,10 @@ impl ManagerApp {
                 if let Some(e) = cfg.applications.iter_mut().find(|a| a.id == app_id) {
                     old_entry = Some(e.clone());
                     e.display_name = display_name;
+                    e.generic_name = generic_name;
+                    e.comment = comment;
+                    e.categories = categories;
+                    e.startup_notify = startup_notify;
                     e.args = args;
                     e.icon_path = icon_path;
                     match form.mode {
@@ -800,6 +1034,10 @@ impl ManagerApp {
                 let entry = AppEntry {
                     id,
                     display_name,
+                    generic_name,
+                    comment,
+                    categories,
+                    startup_notify,
                     source: AppSource::LocalOnly,
                     local_path: managed_path.clone(),
                     current_version: String::new(),
@@ -844,6 +1082,10 @@ impl ManagerApp {
                 let entry = AppEntry {
                     id: id.clone(),
                     display_name,
+                    generic_name,
+                    comment,
+                    categories,
+                    startup_notify,
                     source: AppSource::LocalWithRepo { github_repo: repo },
                     local_path: managed_path.clone(),
                     current_version: String::new(),
@@ -876,7 +1118,15 @@ impl ManagerApp {
 }
 
 impl eframe::App for ManagerApp {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string("side_panel_width", self.side_panel_width.to_string());
+        storage.set_string("show_side_panel", self.show_side_panel.to_string());
+        storage.set_string("compact_mode", self.compact_mode.to_string());
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        crate::ui::theme::apply_style(ctx, self.compact_mode);
+        let size_class = SizeClass::from_width(ctx.screen_rect().width());
         while let Ok(evt) = self.evt_rx.try_recv() {
             self.apply_event(evt);
         }
@@ -890,98 +1140,17 @@ impl eframe::App for ManagerApp {
                         right: crate::ui::theme::SPACE_LG as i8,
                         top: crate::ui::theme::SPACE_MD as i8,
                         bottom: crate::ui::theme::SPACE_MD as i8,
-                    }),
+                    })
+                    .stroke(egui::Stroke::new(1.0_f32, crate::ui::theme::BORDER)),
             )
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.horizontal(|ui| {
-                        let avail = ui.available_size();
-                        if avail.x.is_finite() && avail.y.is_finite() && avail.x >= 28.0 && avail.y >= 28.0 {
-                            let (rect, _) =
-                                ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
-                            if rect.is_finite() && rect.width() > 0.0 && rect.height() > 0.0 {
-                                let r = rect.shrink(3.0);
-                                ui.painter().rect_filled(
-                                    r,
-                                    egui::CornerRadius::same(6),
-                                    crate::ui::theme::ACCENT,
-                                );
-                                ui.painter().rect_stroke(
-                                    r.shrink(5.0),
-                                    egui::CornerRadius::same(3),
-                                    egui::Stroke::new(2.0_f32, eframe::egui::Color32::WHITE),
-                                    egui::StrokeKind::Inside,
-                                );
-                            }
-                        }
-                        ui.add_space(6.0);
-                        ui.label(RichText::new("AppImage Hub").size(22.0).strong());
-                    });
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(crate::ui::theme::primary_button("Add")).clicked() {
-                            self.open_add_form();
-                        }
-                        let updates_count = self.updates_available_count();
-                        let has_active_downloads = !self.ops.is_empty();
-                        let update_all_label = if updates_count > 0 {
-                            format!("Update All ({})", updates_count)
-                        } else {
-                            "Update All".to_string()
-                        };
-                        if ui
-                            .add_enabled(
-                                !has_active_downloads && updates_count > 0,
-                                crate::ui::theme::ghost_button(update_all_label),
-                            )
-                            .clicked()
-                        {
-                            self.update_all();
-                        }
-                        if ui
-                            .add(crate::ui::theme::secondary_button("Check All Updates"))
-                            .clicked()
-                        {
-                            self.check_all_updates();
-                        }
-
-                        ui.add_space(4.0);
-                        if ui
-                            .add(crate::ui::theme::secondary_button("Browse"))
-                            .on_hover_text("Choose custom download folder for GitHub installs")
-                            .clicked()
-                        {
-                            if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                                if let Ok(mut cfg) = self.config.lock() {
-                                    cfg.custom_download_dir = Some(p);
-                                    let _ = cfg.save();
-                                }
-                            }
-                        }
-
-                        let effective_download_dir = self
-                            .config
-                            .lock()
-                            .ok()
-                            .and_then(|c| c.custom_download_dir.clone())
-                            .or_else(|| xdg::managed_apps_dir().ok());
-                        let download_dir_text = effective_download_dir
-                            .as_ref()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_else(|| "unavailable".into());
-                        ui.add(
-                            egui::Label::new(crate::ui::theme::secondary_label(
-                                download_dir_text.clone(),
-                            ))
-                            .truncate(),
-                        )
-                        .on_hover_text(download_dir_text);
-                    });
+                ui.horizontal_wrapped(|ui| {
+                    self.render_top_bar(ui, size_class);
                 });
                 let status_text = self.status.clone();
                 if let Some(status) = status_text {
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
+                    ui.add_space(crate::ui::theme::SPACE_XS);
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(
                             RichText::new(status)
                                 .small()
@@ -994,35 +1163,41 @@ impl eframe::App for ManagerApp {
                 }
             });
 
-        if self.is_right_panel_open() {
-            let available = ctx.screen_rect().width();
-            let available = if available.is_finite() && available > 0.0 {
-                available
+        let panel_open = self.is_right_panel_open() && self.show_side_panel;
+        let use_side_panel =
+            panel_open && matches!(size_class, SizeClass::Large | SizeClass::Medium);
+
+        if use_side_panel {
+            let total = ctx.screen_rect().width();
+            let total = if total.is_finite() && total > 0.0 {
+                total
             } else {
                 800.0
             };
-            let desired = (available * 0.37).clamp(360.0, 520.0);
-            let min_list = 360.0;
-            let panel_width = if available - desired < min_list {
-                (available * 0.92).clamp(320.0, available.max(320.0))
-            } else {
-                desired
-            };
-            let panel_width = if panel_width.is_finite() && panel_width > 0.0 { panel_width } else { 360.0 };
-            egui::SidePanel::right("editor_panel")
-                .resizable(false)
-                .exact_width(panel_width)
+            let desired = (total * 0.37).clamp(360.0, 520.0);
+            let max_allowed = (total - 420.0).max(320.0);
+            let max_panel = desired.min(max_allowed).max(320.0).clamp(320.0, 520.0);
+            let min_panel = 320.0_f32.min(max_panel);
+            let default_width = self.side_panel_width.clamp(min_panel, max_panel);
+            let panel = egui::SidePanel::right("editor_panel")
+                .resizable(true)
+                .default_width(default_width)
+                .width_range(min_panel..=max_panel)
                 .frame(egui::Frame::NONE)
                 .show(ctx, |ui| {
                     if self.add_to.is_some() {
-                        crate::ui::side_panel::render_add_to(ui, self);
+                        crate::ui::side_panel::render_add_to(ui, self, size_class);
                     } else if self.is_form_open {
-                        crate::ui::side_panel::render(ui, self);
+                        crate::ui::side_panel::render(ui, self, size_class);
                     }
                 });
+            let actual = panel.response.rect.width();
+            if actual.is_finite() && actual >= min_panel {
+                self.side_panel_width = actual.clamp(min_panel, 520.0);
+            }
         }
 
-        crate::ui::update_state::render(ctx, self);
+        crate::ui::update_state::render(ctx, self, size_class);
 
         egui::CentralPanel::default()
             .frame(
@@ -1031,12 +1206,43 @@ impl eframe::App for ManagerApp {
                     .inner_margin(egui::Margin::same(crate::ui::theme::SPACE_LG as i8)),
             )
             .show(ctx, |ui| {
-                let apps = self
-                    .config
-                    .lock()
-                    .map(|c| c.applications.clone())
-                    .unwrap_or_default();
-                crate::ui::app_list::render(ui, &apps, self);
+                if panel_open && !use_side_panel {
+                    egui::ScrollArea::vertical()
+                        .id_salt("overlay_panel_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            let max_w = ui.available_width().min(640.0);
+                            ui.set_max_width(max_w);
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add(crate::ui::theme::secondary_button("← Back to list"))
+                                    .clicked()
+                                {
+                                    self.show_side_panel = false;
+                                }
+                            });
+                            ui.add_space(crate::ui::theme::SPACE_SM);
+                            egui::Frame::NONE
+                                .stroke(egui::Stroke::new(1.0_f32, crate::ui::theme::BORDER))
+                                .corner_radius(egui::CornerRadius::same(
+                                    crate::ui::theme::RADIUS_LG,
+                                ))
+                                .show(ui, |ui| {
+                                    if self.add_to.is_some() {
+                                        crate::ui::side_panel::render_add_to(ui, self, size_class);
+                                    } else if self.is_form_open {
+                                        crate::ui::side_panel::render(ui, self, size_class);
+                                    }
+                                });
+                        });
+                } else {
+                    let apps = self
+                        .config
+                        .lock()
+                        .map(|c| c.applications.clone())
+                        .unwrap_or_default();
+                    crate::ui::app_list::render(ui, &apps, self, size_class);
+                }
             });
 
         crate::ui::confirm_dialog::render(ctx, self);
@@ -1410,6 +1616,10 @@ fn spawn_backend(
                                                     } else {
                                                         display_name
                                                     },
+                                                    generic_name: None,
+                                                    comment: None,
+                                                    categories: Some("Utility;".to_string()),
+                                                    startup_notify: true,
                                                     source: AppSource::GithubOnly { github_repo },
                                                     local_path: target,
                                                     current_version: info.tag,

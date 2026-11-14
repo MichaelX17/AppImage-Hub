@@ -12,12 +12,11 @@ pub const TEXT_MUTED: Color32 = Color32::from_rgb(133, 134, 151);
 
 pub const ACCENT: Color32 = Color32::from_rgb(124, 58, 237);
 pub const ACCENT_HOVER: Color32 = Color32::from_rgb(145, 92, 244);
-#[allow(dead_code)]
 pub const SUCCESS: Color32 = Color32::from_rgb(74, 222, 128);
+#[allow(dead_code)]
+pub const WARNING: Color32 = Color32::from_rgb(245, 158, 11);
 pub const DANGER: Color32 = Color32::from_rgb(217, 65, 65);
 pub const NEUTRAL: Color32 = Color32::from_rgb(72, 74, 92);
-#[allow(dead_code)]
-pub const NEUTRAL_HOVER: Color32 = Color32::from_rgb(88, 90, 112);
 
 #[allow(dead_code)]
 pub const RADIUS_SM: u8 = 6;
@@ -25,13 +24,13 @@ pub const RADIUS_MD: u8 = 10;
 pub const RADIUS_LG: u8 = 12;
 
 pub const SPACE_XS: f32 = 4.0;
-#[allow(dead_code)]
 pub const SPACE_SM: f32 = 8.0;
-#[allow(dead_code)]
 pub const SPACE_MD: f32 = 12.0;
 pub const SPACE_LG: f32 = 16.0;
+#[allow(dead_code)]
+pub const SPACE_XL: f32 = 24.0;
 
-pub fn apply(ctx: &egui::Context) {
+pub fn apply_style(ctx: &egui::Context, compact: bool) {
     let mut visuals = Visuals::dark();
     visuals.override_text_color = Some(TEXT_PRIMARY);
     visuals.panel_fill = BG;
@@ -72,10 +71,16 @@ pub fn apply(ctx: &egui::Context) {
         visuals,
         ..Default::default()
     };
-    style.spacing.item_spacing = egui::vec2(SPACE_SM, SPACE_SM);
-    style.spacing.button_padding = egui::vec2(12.0, 6.0);
-    style.spacing.interact_size.y = 30.0;
+    let s = if compact { 0.82 } else { 1.0 };
+    style.spacing.item_spacing = egui::vec2(SPACE_SM * s, SPACE_SM * s);
+    style.spacing.button_padding = egui::vec2(12.0 * s, 6.0 * s);
+    style.spacing.interact_size.y = 30.0 * s;
+    style.spacing.window_margin = Margin::same(SPACE_MD as i8);
     ctx.set_style(style);
+}
+
+pub fn apply(ctx: &egui::Context) {
+    apply_style(ctx, false);
 }
 
 pub fn card_frame() -> egui::Frame {
@@ -86,7 +91,6 @@ pub fn card_frame() -> egui::Frame {
         .inner_margin(Margin::same(SPACE_LG as i8))
 }
 
-#[allow(dead_code)]
 pub fn panel_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(SURFACE)
@@ -122,11 +126,54 @@ pub fn status_dot(ui: &mut egui::Ui, color: Color32) {
     }
 }
 
-#[allow(dead_code)]
 pub fn muted_label(text: impl Into<String>) -> RichText {
     RichText::new(text.into()).color(TEXT_MUTED)
 }
 
 pub fn secondary_label(text: impl Into<String>) -> RichText {
     RichText::new(text.into()).color(TEXT_SECONDARY)
+}
+
+pub fn section_heading(text: impl Into<String>) -> RichText {
+    RichText::new(text.into())
+        .strong()
+        .size(15.0)
+        .color(TEXT_PRIMARY)
+}
+
+pub fn field_label(text: impl Into<String>) -> RichText {
+    RichText::new(text.into()).strong().color(TEXT_PRIMARY)
+}
+
+/// A small inline badge indicating an update is available.
+/// Uses both color and text so it is not color-alone.
+pub fn update_available_label(tag: &str) -> RichText {
+    RichText::new(format!("↑ {} — Update available", tag))
+        .strong()
+        .color(ACCENT_HOVER)
+}
+
+/// Label for the "up to date" version status.
+pub fn up_to_date_label(tag: &str) -> RichText {
+    RichText::new(format!("✓ {} — Up to date", tag)).color(SUCCESS)
+}
+
+/// A compact button styled for a primary update action when an update is available.
+/// Visually distinct from the normal ghost Update button.
+pub fn update_button() -> egui::Button<'static> {
+    egui::Button::new(RichText::new("Update").color(Color32::WHITE).strong()).fill(ACCENT)
+}
+
+/// A labeled field row helper: renders `label` above `content` function with consistent spacing.
+/// Returns the result of `content`.
+#[allow(dead_code)]
+pub fn labeled_field<R>(
+    ui: &mut egui::Ui,
+    label: impl Into<String>,
+    content: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.label(field_label(label.into()));
+    let r = content(ui);
+    ui.add_space(SPACE_MD);
+    r
 }

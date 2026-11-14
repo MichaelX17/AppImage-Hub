@@ -59,8 +59,6 @@ pub fn sanitize_name(input: &str) -> String {
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' {
                 c.to_ascii_lowercase()
-            } else if c.is_whitespace() || c == '.' {
-                '-'
             } else {
                 '-'
             }
