@@ -1,7 +1,64 @@
+//! Add / Edit AppImage side panel (neon/dark redesign).
+//!
+//! Layout: header (icon + title + Hide/Close), scrollable form with
+//! field-level validation, fixed footer with Cancel/Save.
+
 use crate::app::ManagerApp;
 use crate::ui::breakpoints::SizeClass;
 use crate::ui::theme;
-use eframe::egui::{self, Align, Layout, RichText};
+use eframe::egui::{self, Align, Color32, CornerRadius, Layout, Margin, RichText, Stroke};
+
+const FORM_INPUT_HEIGHT: f32 = 42.0;
+
+fn form_text_input(
+    ui: &mut egui::Ui,
+    value: &mut String,
+    hint: &str,
+    width: f32,
+) -> egui::Response {
+    ui.add_sized(
+        [width, FORM_INPUT_HEIGHT],
+        egui::TextEdit::singleline(value)
+            .hint_text(RichText::new(hint).color(theme::with_alpha(theme::TEXT_MUTED, 180)))
+            .margin(Margin::symmetric(12, 10))
+            .vertical_align(Align::Center)
+            .desired_width(width),
+    )
+}
+
+fn form_primary_button(text: impl Into<String>) -> egui::Button<'static> {
+    egui::Button::new(
+        RichText::new(text.into())
+            .size(15.0)
+            .strong()
+            .color(Color32::WHITE),
+    )
+    .fill(theme::ACCENT)
+    .stroke(Stroke::new(1.0_f32, theme::ACCENT_HOVER))
+    .corner_radius(CornerRadius::same(theme::RADIUS_MD))
+}
+
+fn form_secondary_button(text: impl Into<String>) -> egui::Button<'static> {
+    egui::Button::new(
+        RichText::new(text.into())
+            .size(13.0)
+            .color(theme::TEXT_PRIMARY),
+    )
+    .fill(theme::SURFACE_RAISED)
+    .stroke(Stroke::new(1.0_f32, theme::BORDER))
+    .corner_radius(CornerRadius::same(theme::RADIUS_MD))
+}
+
+fn form_ghost_button(text: impl Into<String>) -> egui::Button<'static> {
+    egui::Button::new(
+        RichText::new(text.into())
+            .size(13.0)
+            .color(theme::TEXT_SECONDARY),
+    )
+    .fill(Color32::TRANSPARENT)
+    .stroke(Stroke::NONE)
+    .corner_radius(CornerRadius::same(theme::RADIUS_MD))
+}
 
 #[derive(Default, Clone, PartialEq, Eq)]
 pub enum SidePanelMode {
@@ -31,6 +88,9 @@ pub enum AssetSelectionMode {
     Manual,
 }
 
+/// Maximum length accepted by the "Display Name" input.
+pub const DISPLAY_NAME_LIMIT: usize = 100;
+
 #[derive(Clone)]
 pub struct SidePanelFormState {
     pub editing_app_id: Option<String>,
@@ -39,6 +99,9 @@ pub struct SidePanelFormState {
     pub comment: String,
     pub category: String,
     pub custom_category: String,
+    /// Set once the user explicitly picks a category, so metadata
+    /// auto-detection can never overwrite their choice.
+    pub category_user_selected: bool,
     pub startup_notify: bool,
     pub mode: SidePanelMode,
     pub local_path: String,
@@ -61,6 +124,7 @@ impl Default for SidePanelFormState {
             comment: String::new(),
             category: "Utility".to_string(),
             custom_category: String::new(),
+            category_user_selected: false,
             startup_notify: true,
             mode: SidePanelMode::default(),
             local_path: String::new(),
@@ -81,21 +145,24 @@ impl SidePanelFormState {
         *self = Self::default();
     }
 
+    /// The category the user actually selected, always non-empty and without a
+    /// trailing `;` (callers append it when writing `Categories=`).
     pub fn effective_category(&self) -> String {
-        if self.category == "Custom" {
-            let c = self.custom_category.trim();
-            if c.is_empty() {
-                "Utility".to_string()
-            } else {
-                c.to_string()
-            }
+        let chosen = if self.category == "Custom" {
+            self.custom_category.trim()
         } else {
-            self.category.clone()
+            self.category.trim()
+        };
+        let chosen = chosen.trim_end_matches(';').trim();
+        if chosen.is_empty() {
+            "Utility".to_string()
+        } else {
+            chosen.to_string()
         }
     }
 }
 
-pub fn render(ui: &mut egui::Ui, mgr: &mut ManagerApp, size_class: SizeClass) {
+pub fn render(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeClass) {
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         close_editor(mgr);
         return;
@@ -108,48 +175,14 @@ pub fn render(ui: &mut egui::Ui, mgr: &mut ManagerApp, size_class: SizeClass) {
     };
 
     theme::panel_frame().show(ui, |ui| {
-        draw_accent_rail(ui);
+        ui.set_min_height(ui.available_height());
+        render_header(ui, title);
 
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(if is_edit { "✎" } else { "+" })
-                    .size(18.0)
-                    .color(theme::ACCENT_HOVER),
-            );
-            ui.add_space(4.0);
-            ui.label(RichText::new(title).size(20.0).strong());
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui
-                    .add(theme::ghost_button("✕ Close"))
-                    .on_hover_text("Close panel (Esc)")
-                    .clicked()
-                {
-                    close_editor(mgr);
-                }
-                if ui
-                    .add(theme::ghost_button("Hide"))
-                    .on_hover_text("Hide panel and return to list")
-                    .clicked()
-                {
-                    mgr.show_side_panel = false;
-                }
-            });
-        });
+        ui.add_space(theme::SPACE_LG);
 
-        ui.add_space(theme::SPACE_SM);
-        ui.label(theme::secondary_label(
-            "Configure the AppImage source, metadata, and launch options.",
-        ));
-        ui.add_space(theme::SPACE_MD);
-        ui.separator();
-        ui.add_space(theme::SPACE_SM);
-
-        // Compute footer height dynamically based on current interact size.
-        // Footer contains: validation row (interact_size.y) + separator + button row (interact_size.y)
-        // plus margins. Add a generous buffer to avoid cutoff.
-        let interact_y = ui.spacing().interact_size.y;
-        let footer_height = (interact_y * 2.5 + theme::SPACE_SM * 3.0).max(60.0);
-
+        // Reserve enough room for the validation row, primary action, and the
+        // secondary Cancel action at the bottom of the panel.
+        let footer_height = 128.0;
         let available = ui.available_height();
         let available = if available.is_finite() {
             available
@@ -163,51 +196,68 @@ pub fn render(ui: &mut egui::Ui, mgr: &mut ManagerApp, size_class: SizeClass) {
             .auto_shrink([false, false])
             .max_height(form_height)
             .show(ui, |ui| {
-                render_form_fields(ui, mgr, size_class);
+                render_form_fields(ui, mgr);
             });
 
         ui.add_space(theme::SPACE_SM);
-        ui.separator();
-        ui.add_space(theme::SPACE_XS);
 
         let validation = validation_message(&mgr.side_panel_form);
         let can_save = validation.is_none();
 
-        // Validation message row
         if let Some(msg) = validation {
-            ui.label(
-                RichText::new(format!("⚠ {}", msg))
-                    .color(theme::DANGER)
-                    .small(),
-            );
+            ui.label(RichText::new(msg).color(theme::DANGER).size(12.0));
         } else {
-            ui.label(theme::muted_label("All required fields are complete.").small());
+            ui.label(theme::muted_label("All required fields are complete.").size(11.0));
         }
 
-        ui.add_space(theme::SPACE_XS);
+        ui.add_space(theme::SPACE_SM);
 
-        // Button row: Cancel | Save
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.add_enabled_ui(can_save, |ui| {
-                let btn = ui.add(theme::primary_button("Save"));
-                if !can_save {
-                    btn.on_disabled_hover_text("Complete required fields to save");
-                } else if btn.clicked() {
-                    mgr.submit_side_panel_form();
-                }
-            });
-            if ui.add(theme::secondary_button("Cancel")).clicked() {
-                close_editor(mgr);
+        let button_width = ui.available_width();
+        ui.add_enabled_ui(can_save, |ui| {
+            let label = if is_edit {
+                "Save changes"
+            } else {
+                "Add AppImage"
+            };
+            let btn = ui.add_sized(
+                [button_width, FORM_INPUT_HEIGHT + 4.0],
+                form_primary_button(label),
+            );
+            if !can_save {
+                btn.on_disabled_hover_text("Complete required fields to save");
+            } else if btn.clicked() {
+                mgr.submit_side_panel_form();
             }
         });
+
+        ui.add_space(theme::SPACE_XS);
+        if ui
+            .add_sized([button_width, 34.0], form_ghost_button("Cancel"))
+            .clicked()
+        {
+            close_editor(mgr);
+        }
     });
+}
+
+fn render_header(ui: &mut egui::Ui, title: &str) {
+    ui.label(
+        RichText::new(title)
+            .size(32.0)
+            .strong()
+            .color(theme::TEXT_PRIMARY),
+    );
+    ui.add_space(theme::SPACE_XS);
+    ui.label(
+        theme::secondary_label("Configure the AppImage source, metadata, and launch options.")
+            .size(13.0),
+    );
 }
 
 fn close_editor(mgr: &mut ManagerApp) {
     mgr.is_form_open = false;
     mgr.side_panel_form.clear();
 }
-
 pub fn render_add_to(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeClass) {
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         mgr.close_add_to();
@@ -221,25 +271,25 @@ pub fn render_add_to(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeC
         draw_accent_rail(ui);
 
         ui.horizontal(|ui| {
-            ui.label(RichText::new("+").size(18.0).color(theme::ACCENT_HOVER));
-            ui.add_space(4.0);
-            ui.label(RichText::new("Add to..").size(20.0).strong());
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui
-                    .add(theme::ghost_button("✕ Close"))
-                    .on_hover_text("Close panel (Esc)")
-                    .clicked()
-                {
-                    mgr.close_add_to();
-                }
-                if ui
-                    .add(theme::ghost_button("Hide"))
-                    .on_hover_text("Hide panel and return to list")
-                    .clicked()
-                {
-                    mgr.show_side_panel = false;
-                }
-            });
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::hover());
+            ui.painter()
+                .circle_filled(rect.center(), 15.0, theme::ACCENT_SOFT);
+            ui.painter()
+                .circle_stroke(rect.center(), 15.0, Stroke::new(1.0_f32, theme::ACCENT));
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "+",
+                egui::FontId::proportional(16.0),
+                theme::ACCENT_HOVER,
+            );
+            ui.add_space(theme::SPACE_SM);
+            ui.label(
+                RichText::new("Add to…")
+                    .size(20.0)
+                    .strong()
+                    .color(theme::TEXT_PRIMARY),
+            );
         });
 
         ui.add_space(theme::SPACE_MD);
@@ -278,7 +328,7 @@ pub fn render_add_to(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeC
                     p.display(),
                     if exists { " (exists)" } else { "" }
                 ))
-                .small(),
+                .size(11.0),
             );
         }
         if let Some(p) = &menu_path {
@@ -289,7 +339,7 @@ pub fn render_add_to(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeC
                     p.display(),
                     if exists { " (exists)" } else { "" }
                 ))
-                .small(),
+                .size(11.0),
             );
         }
 
@@ -298,60 +348,103 @@ pub fn render_add_to(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeC
         ui.add_space(theme::SPACE_XS);
         ui.checkbox(&mut state.menu, "Start menu entry");
         ui.add_space(theme::SPACE_MD);
-        ui.label(theme::muted_label(
-            "Checked = create/keep. Unchecked = remove if present.",
-        ));
+        ui.label(
+            theme::muted_label("Checked = create/keep. Unchecked = remove if present.").size(11.0),
+        );
 
         mgr.add_to = Some(state);
 
         ui.add_space(theme::SPACE_LG);
         ui.separator();
         ui.add_space(theme::SPACE_SM);
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.add(theme::primary_button("Apply")).clicked() {
-                mgr.apply_add_to();
-            }
-            if ui.add(theme::secondary_button("Cancel")).clicked() {
-                mgr.close_add_to();
-            }
-        });
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 32.0),
+            Layout::right_to_left(Align::Min),
+            |ui| {
+                if ui.add(theme::primary_button("Apply")).clicked() {
+                    mgr.apply_add_to();
+                }
+                if ui.add(theme::ghost_button("Cancel")).clicked() {
+                    mgr.close_add_to();
+                }
+            },
+        );
     });
 }
 
-fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeClass) {
-    let avail_w = ui.available_width();
+fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
+    let width = ui.available_width().max(120.0);
+    ui.spacing_mut().interact_size.y = FORM_INPUT_HEIGHT;
+    let touched = form_touched(&mgr.side_panel_form);
 
     // ── Application section ──────────────────────────────────────────────
     ui.label(theme::section_heading(
         "Application (KDE / Start Menu Metadata)",
     ));
-    ui.add_space(theme::SPACE_XS);
+    ui.add_space(theme::SPACE_SM);
+
     ui.label(theme::field_label("Display Name"));
-    ui.add(
+    ui.add_sized(
+        [width, FORM_INPUT_HEIGHT],
         egui::TextEdit::singleline(&mut mgr.side_panel_form.display_name)
-            .hint_text("Application name (e.g. PCSX2)")
-            .desired_width(avail_w.max(80.0)),
+            .hint_text(
+                RichText::new("Application name (e.g. PCSX2)")
+                    .color(theme::with_alpha(theme::TEXT_MUTED, 180)),
+            )
+            .char_limit(DISPLAY_NAME_LIMIT)
+            .margin(Margin::symmetric(12, 10))
+            .vertical_align(Align::Center)
+            .desired_width(width),
+    );
+    // Character counter, right-aligned below the input.
+    // NOTE: uses a fixed-height row with `Align::Min` — `Align::Center` makes
+    // egui's horizontal layout claim the full remaining height of the form,
+    // which would leave a huge gap before the next field.
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), 14.0),
+        Layout::right_to_left(Align::Min),
+        |ui| {
+            let used = mgr.side_panel_form.display_name.chars().count();
+            let color = if used >= DISPLAY_NAME_LIMIT {
+                theme::WARNING
+            } else {
+                theme::TEXT_MUTED
+            };
+            ui.label(
+                RichText::new(format!("{used}/{DISPLAY_NAME_LIMIT}"))
+                    .size(11.0)
+                    .color(color),
+            );
+        },
+    );
+    required_hint(
+        ui,
+        touched && mgr.side_panel_form.display_name.trim().is_empty(),
+        "Display Name is required.",
     );
     ui.add_space(theme::SPACE_SM);
 
     ui.label(theme::field_label("Generic Name (optional)"));
-    ui.add(
-        egui::TextEdit::singleline(&mut mgr.side_panel_form.generic_name)
-            .hint_text("e.g. PlayStation 2 Emulator")
-            .desired_width(avail_w.max(80.0)),
+    form_text_input(
+        ui,
+        &mut mgr.side_panel_form.generic_name,
+        "e.g. PlayStation 2 Emulator",
+        width,
     );
     ui.label(
-        theme::muted_label("Shown beside or under the name in KDE Application Launcher.").small(),
+        theme::muted_label("Shown beside or under the name in KDE Application Launcher.")
+            .size(11.0),
     );
     ui.add_space(theme::SPACE_SM);
 
     ui.label(theme::field_label("Comment / Description (optional)"));
-    ui.add(
-        egui::TextEdit::singleline(&mut mgr.side_panel_form.comment)
-            .hint_text("e.g. A Sony PlayStation 2 video game console emulator")
-            .desired_width(avail_w.max(80.0)),
+    form_text_input(
+        ui,
+        &mut mgr.side_panel_form.comment,
+        "e.g. A Sony PlayStation 2 video game console emulator",
+        width,
     );
-    ui.label(theme::muted_label("Tooltip description in KDE Start Menu.").small());
+    ui.label(theme::muted_label("Tooltip description in KDE Start Menu.").size(11.0));
     ui.add_space(theme::SPACE_SM);
 
     ui.label(theme::field_label("KDE Menu Category"));
@@ -366,9 +459,10 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: Size
             .unwrap_or("Custom Category…")
     };
 
+    let category_before = mgr.side_panel_form.category.clone();
     egui::ComboBox::from_id_salt("kde_category_combo")
         .selected_text(selected_label)
-        .width(avail_w.max(80.0))
+        .width(width.max(80.0))
         .show_ui(ui, |ui| {
             for (label, val) in KDE_CATEGORIES {
                 ui.selectable_value(&mut mgr.side_panel_form.category, val.to_string(), *label);
@@ -379,17 +473,26 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: Size
                 "Custom Category…",
             );
         });
+    if mgr.side_panel_form.category != category_before {
+        mgr.side_panel_form.category_user_selected = true;
+    }
 
     if mgr.side_panel_form.category == "Custom" {
         ui.add_space(theme::SPACE_XS);
-        ui.add(
-            egui::TextEdit::singleline(&mut mgr.side_panel_form.custom_category)
-                .hint_text("e.g. Game, Utility, AudioVideo")
-                .desired_width(avail_w.max(80.0)),
+        let custom_before = mgr.side_panel_form.custom_category.clone();
+        form_text_input(
+            ui,
+            &mut mgr.side_panel_form.custom_category,
+            "e.g. Game, Utility, AudioVideo",
+            width,
         );
+        if mgr.side_panel_form.custom_category != custom_before {
+            mgr.side_panel_form.category_user_selected = true;
+        }
     }
     ui.label(
-        theme::muted_label("Folder in the KDE Start Menu tree where the app will appear.").small(),
+        theme::muted_label("Folder in the KDE Start Menu tree where the app will appear.")
+            .size(11.0),
     );
     ui.add_space(theme::SPACE_SM);
 
@@ -397,30 +500,31 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: Size
         &mut mgr.side_panel_form.startup_notify,
         "Enable launch feedback (StartupNotify)",
     );
-    ui.label(theme::muted_label("Shows launch animation/busy cursor in Plasma session.").small());
-    ui.add_space(theme::SPACE_MD);
-
+    ui.label(
+        theme::muted_label("Shows launch animation/busy cursor in Plasma session.").size(11.0),
+    );
+    ui.add_space(theme::SPACE_LG);
     // ── Source section ───────────────────────────────────────────────────
     ui.label(theme::section_heading("Source"));
-    ui.add_space(theme::SPACE_XS);
+    ui.add_space(theme::SPACE_SM);
+
     ui.label(theme::field_label("Source Type"));
-    ui.horizontal_wrapped(|ui| {
-        ui.selectable_value(
-            &mut mgr.side_panel_form.mode,
-            SidePanelMode::LocalOnly,
-            "Local Only",
-        );
-        ui.selectable_value(
-            &mut mgr.side_panel_form.mode,
-            SidePanelMode::LocalWithRepo,
-            "Local + Repo",
-        );
-        ui.selectable_value(
-            &mut mgr.side_panel_form.mode,
-            SidePanelMode::GithubOnly,
-            "GitHub Only",
-        );
-    });
+    let mode_index = match mgr.side_panel_form.mode {
+        SidePanelMode::LocalOnly => 0,
+        SidePanelMode::LocalWithRepo => 1,
+        SidePanelMode::GithubOnly => 2,
+    };
+    if let Some(index) = segmented_row(
+        ui,
+        &["Local Only", "Local + Repo", "GitHub Only"],
+        mode_index,
+    ) {
+        mgr.side_panel_form.mode = match index {
+            0 => SidePanelMode::LocalOnly,
+            1 => SidePanelMode::LocalWithRepo,
+            _ => SidePanelMode::GithubOnly,
+        };
+    }
     ui.add_space(theme::SPACE_MD);
 
     let needs_local_path = matches!(
@@ -434,18 +538,21 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: Size
 
     if needs_local_path {
         ui.label(theme::field_label("AppImage Path"));
+        let path_editable = mgr.side_panel_form.editing_app_id.is_none();
         ui.horizontal(|ui| {
-            let browse_w = 92.0;
-            let path_editable = mgr.side_panel_form.editing_app_id.is_none();
-            let w = ui.available_width().max(120.0);
-            ui.add_enabled(
-                path_editable,
-                egui::TextEdit::singleline(&mut mgr.side_panel_form.local_path)
-                    .hint_text("Path to .AppImage file")
-                    .desired_width((w - browse_w - theme::SPACE_SM).max(80.0)),
-            );
+            let browse_w = 96.0;
+            let spacing = ui.spacing().item_spacing.x;
+            let input_w = (ui.available_width() - browse_w - spacing).max(100.0);
+            ui.add_enabled_ui(path_editable, |ui| {
+                form_text_input(
+                    ui,
+                    &mut mgr.side_panel_form.local_path,
+                    "Path to .AppImage file",
+                    input_w,
+                );
+            });
             if ui
-                .add_enabled(path_editable, theme::secondary_button("Browse"))
+                .add_enabled(path_editable, form_secondary_button("Browse"))
                 .on_disabled_hover_text("Managed path is fixed for existing entries")
                 .clicked()
             {
@@ -459,44 +566,55 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: Size
             }
         });
         if mgr.side_panel_form.editing_app_id.is_some() {
-            ui.label(theme::muted_label("Managed path is fixed for existing entries.").small());
+            ui.label(theme::muted_label("Managed path is fixed for existing entries.").size(11.0));
         } else {
-            ui.label(theme::muted_label("Select the local .AppImage to import or track.").small());
+            ui.label(
+                theme::muted_label("Select the local .AppImage to import or track.").size(11.0),
+            );
         }
+        required_hint(
+            ui,
+            touched && mgr.side_panel_form.local_path.trim().is_empty(),
+            "An AppImage file is required.",
+        );
         ui.add_space(theme::SPACE_MD);
     } else {
         ui.label(
-            theme::muted_label("AppImage will be downloaded and managed after install.").small(),
+            theme::muted_label("AppImage will be downloaded and managed after install.").size(11.0),
         );
         ui.add_space(theme::SPACE_MD);
     }
-
     // ── Metadata section ─────────────────────────────────────────────────
+    ui.add_space(theme::SPACE_LG);
     ui.label(theme::section_heading("Metadata"));
-    ui.add_space(theme::SPACE_XS);
+    ui.add_space(theme::SPACE_SM);
+
     ui.label(theme::field_label("Icon (optional)"));
     ui.horizontal(|ui| {
-        let current_icon = mgr.side_panel_form.icon_path.trim();
+        let current_icon = mgr.side_panel_form.icon_path.trim().to_string();
         if !current_icon.is_empty() {
-            let icon_p = std::path::Path::new(current_icon);
+            let icon_p = std::path::Path::new(&current_icon);
             if icon_p.exists() {
                 let uri = format!("file://{}", icon_p.display());
                 ui.add(
                     egui::Image::new(uri)
-                        .fit_to_exact_size(egui::vec2(28.0, 28.0))
-                        .corner_radius(egui::CornerRadius::same(theme::RADIUS_SM)),
+                        .fit_to_exact_size(egui::vec2(26.0, 26.0))
+                        .corner_radius(CornerRadius::same(theme::RADIUS_SM)),
                 );
+                ui.add_space(theme::SPACE_XS);
             }
         }
 
-        let browse_w = 92.0;
-        let w = ui.available_width().max(120.0);
-        ui.add(
-            egui::TextEdit::singleline(&mut mgr.side_panel_form.icon_path)
-                .hint_text("Extracted from AppImage automatically")
-                .desired_width((w - browse_w - theme::SPACE_SM).max(80.0)),
+        let browse_w = 96.0;
+        let spacing = ui.spacing().item_spacing.x;
+        let input_w = (ui.available_width() - browse_w - spacing).max(100.0);
+        form_text_input(
+            ui,
+            &mut mgr.side_panel_form.icon_path,
+            "Extracted from AppImage automatically",
+            input_w,
         );
-        if ui.add(theme::secondary_button("Browse")).clicked() {
+        if ui.add(form_secondary_button("Browse")).clicked() {
             if let Some(p) = rfd::FileDialog::new()
                 .add_filter("Image", &["png", "svg", "xpm", "ico"])
                 .pick_file()
@@ -507,47 +625,53 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: Size
     });
     ui.label(
         theme::muted_label("Embedded AppImage icon is extracted automatically if left empty.")
-            .small(),
+            .size(11.0),
     );
     ui.add_space(theme::SPACE_MD);
 
     // ── Repository section (shown when relevant) ─────────────────────────
     if needs_repo {
+        ui.add_space(theme::SPACE_LG);
         ui.label(theme::field_label("GitHub URL"));
-        ui.add(
-            egui::TextEdit::singleline(&mut mgr.side_panel_form.github_url)
-                .hint_text("owner/repo or https://github.com/owner/repo")
-                .desired_width(avail_w.max(80.0)),
+        form_text_input(
+            ui,
+            &mut mgr.side_panel_form.github_url,
+            "owner/repo or https://github.com/owner/repo",
+            width,
         );
-        ui.label(theme::muted_label("Required for update checks and GitHub installs.").small());
+        ui.label(theme::muted_label("Required for update checks and GitHub installs.").size(11.0));
+        required_hint(
+            ui,
+            touched && mgr.side_panel_form.github_url.trim().is_empty(),
+            "Repository is required (owner/repo).",
+        );
         ui.add_space(theme::SPACE_SM);
 
         ui.label(theme::field_label("Asset Selection Mode"));
-        ui.horizontal(|ui| {
-            ui.selectable_value(
-                &mut mgr.side_panel_form.asset_selection_mode,
-                AssetSelectionMode::Smart,
-                "⚡ Smart (Auto)",
-            );
-            ui.selectable_value(
-                &mut mgr.side_panel_form.asset_selection_mode,
-                AssetSelectionMode::Manual,
-                "✍ Manual",
-            );
-        });
-
+        let asset_index = match mgr.side_panel_form.asset_selection_mode {
+            AssetSelectionMode::Smart => 0,
+            AssetSelectionMode::Manual => 1,
+        };
+        if let Some(index) = segmented_row(ui, &["Smart (Auto)", "Manual"], asset_index) {
+            mgr.side_panel_form.asset_selection_mode = if index == 0 {
+                AssetSelectionMode::Smart
+            } else {
+                AssetSelectionMode::Manual
+            };
+        }
+        ui.add_space(theme::SPACE_SM);
         match mgr.side_panel_form.asset_selection_mode {
             AssetSelectionMode::Smart => {
                 ui.label(
                     theme::muted_label(
                         "Auto-detects the optimal AppImage for your CPU architecture (x86_64/amd64) and excludes hashes/zsync.",
                     )
-                    .small(),
+                    .size(11.0),
                 );
             }
             AssetSelectionMode::Manual => {
                 ui.horizontal(|ui| {
-                    let fetch_btn = ui.add(theme::secondary_button("Fetch Assets"));
+                    let fetch_btn = ui.add(form_secondary_button("Fetch Assets"));
                     if fetch_btn.clicked() {
                         let repo = mgr.side_panel_form.github_url.trim().to_string();
                         if !repo.is_empty() {
@@ -558,16 +682,12 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: Size
                     }
                     if mgr.side_panel_form.is_fetching_assets {
                         ui.spinner();
-                        ui.label(theme::muted_label("Fetching assets...").small());
+                        ui.label(theme::muted_label("Fetching assets...").size(11.0));
                     }
                 });
 
                 if let Some(ref err) = mgr.side_panel_form.fetch_assets_error {
-                    ui.label(
-                        RichText::new(format!("⚠ {}", err))
-                            .color(theme::DANGER)
-                            .small(),
-                    );
+                    ui.label(RichText::new(err).color(theme::DANGER).size(11.0));
                 }
 
                 if !mgr.side_panel_form.available_assets.is_empty() {
@@ -578,7 +698,7 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: Size
                         .unwrap_or("Select an AppImage asset…");
                     egui::ComboBox::from_id_salt("manual_asset_combo")
                         .selected_text(selected_text)
-                        .width(avail_w.max(80.0))
+                        .width(width.max(80.0))
                         .show_ui(ui, |ui| {
                             for asset in &mgr.side_panel_form.available_assets {
                                 let mb = asset.size as f64 / (1024.0 * 1024.0);
@@ -595,17 +715,25 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: Size
                 {
                     if let Some(ref current) = mgr.side_panel_form.manual_asset {
                         ui.label(
-                            theme::muted_label(format!("Tracking asset: {}", current)).small(),
+                            theme::muted_label(format!("Tracking asset: {current}")).size(11.0),
                         );
                     } else {
                         ui.label(
                             theme::muted_label(
                                 "Click 'Fetch Assets' to choose from available .AppImages.",
                             )
-                            .small(),
+                            .size(11.0),
                         );
                     }
                 }
+
+                required_hint(
+                    ui,
+                    touched
+                        && mgr.side_panel_form.asset_selection_mode == AssetSelectionMode::Manual
+                        && mgr.side_panel_form.manual_asset.is_none(),
+                    "Select an AppImage asset (or switch to Smart mode).",
+                );
             }
         }
         ui.add_space(theme::SPACE_MD);
@@ -614,17 +742,98 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: Size
     // The field value is preserved in state if the user switches back.
 
     // ── Launch section ───────────────────────────────────────────────────
-    ui.label(theme::section_heading("Launch"));
-    ui.add_space(theme::SPACE_XS);
-    ui.label(theme::field_label("Launch Args (optional)"));
-    ui.add(
-        egui::TextEdit::singleline(&mut mgr.side_panel_form.launch_args)
-            .hint_text("Optional arguments passed at launch")
-            .desired_width(avail_w.max(80.0)),
-    );
+    ui.add_space(theme::SPACE_LG);
+    egui::CollapsingHeader::new(
+        RichText::new("Launch Args")
+            .strong()
+            .color(theme::TEXT_PRIMARY),
+    )
+    .id_salt("launch_args_accordion")
+    .default_open(false)
+    .show(ui, |ui| {
+        ui.label(
+            theme::muted_label("Optional arguments passed to the AppImage at launch.").size(11.0),
+        );
+        ui.add_space(theme::SPACE_XS);
+        form_text_input(
+            ui,
+            &mut mgr.side_panel_form.launch_args,
+            "--fullscreen --foo=bar",
+            ui.available_width().max(120.0),
+        );
+    });
     ui.add_space(theme::SPACE_SM);
 }
+/// True once the user has entered anything (or when editing). Field-level
+/// errors stay hidden on a pristine "Add" form to avoid a wall of red.
+fn form_touched(form: &SidePanelFormState) -> bool {
+    form.editing_app_id.is_some()
+        || [
+            form.display_name.as_str(),
+            form.generic_name.as_str(),
+            form.comment.as_str(),
+            form.local_path.as_str(),
+            form.icon_path.as_str(),
+            form.github_url.as_str(),
+            form.launch_args.as_str(),
+        ]
+        .iter()
+        .any(|value| !value.trim().is_empty())
+}
 
+/// Red inline validation message shown directly below the offending field.
+fn required_hint(ui: &mut egui::Ui, show: bool, message: &str) {
+    if show {
+        ui.label(RichText::new(message).color(theme::DANGER).size(11.0));
+    }
+}
+
+/// Segmented control: a row of pill buttons, the active one filled with accent.
+/// Returns the index the user clicked, if any.
+fn segmented_row(ui: &mut egui::Ui, labels: &[&str], selected: usize) -> Option<usize> {
+    if labels.is_empty() {
+        return None;
+    }
+    let gap = ui.spacing().item_spacing.x;
+    let total = ui.available_width();
+    let count = labels.len() as f32;
+    let width = ((total - gap * (count - 1.0)) / count).max(64.0);
+    let mut clicked = None;
+    ui.horizontal(|ui| {
+        for (index, label) in labels.iter().enumerate() {
+            if ui
+                .add_sized(
+                    [width, FORM_INPUT_HEIGHT],
+                    segment_button(label, index == selected),
+                )
+                .clicked()
+            {
+                clicked = Some(index);
+            }
+        }
+    });
+    clicked
+}
+
+fn segment_button(label: &str, selected: bool) -> egui::Button<'static> {
+    let (fill, color, stroke) = if selected {
+        (
+            theme::ACCENT,
+            Color32::WHITE,
+            Stroke::new(1.0_f32, theme::ACCENT_HOVER),
+        )
+    } else {
+        (
+            theme::SURFACE_RAISED,
+            theme::TEXT_SECONDARY,
+            Stroke::new(1.0_f32, theme::BORDER),
+        )
+    };
+    egui::Button::new(RichText::new(label).size(13.0).strong().color(color))
+        .fill(fill)
+        .stroke(stroke)
+        .corner_radius(CornerRadius::same(theme::RADIUS_MD))
+}
 fn validation_message(form: &SidePanelFormState) -> Option<&'static str> {
     if form.display_name.trim().is_empty() {
         return Some("Display Name is required.");
@@ -750,5 +959,53 @@ mod tests {
 
         form.github_url = "https://github.com/owner/repo".into();
         assert_eq!(validation_message(&form), None);
+    }
+
+    #[test]
+    fn test_pristine_form_is_not_touched() {
+        assert!(!form_touched(&SidePanelFormState::default()));
+    }
+
+    #[test]
+    fn test_typing_marks_form_touched() {
+        let form = SidePanelFormState {
+            display_name: "A".into(),
+            ..Default::default()
+        };
+        assert!(form_touched(&form));
+    }
+
+    #[test]
+    fn effective_category_returns_standard_selection() {
+        let form = SidePanelFormState {
+            category: "Graphics".into(),
+            ..Default::default()
+        };
+        assert_eq!(form.effective_category(), "Graphics");
+    }
+
+    #[test]
+    fn effective_category_uses_custom_value() {
+        let form = SidePanelFormState {
+            category: "Custom".into(),
+            custom_category: "  Game;Emulator;  ".into(),
+            ..Default::default()
+        };
+        assert_eq!(form.effective_category(), "Game;Emulator");
+    }
+
+    #[test]
+    fn effective_category_never_returns_empty() {
+        let form = SidePanelFormState {
+            category: "Custom".into(),
+            custom_category: "   ".into(),
+            ..Default::default()
+        };
+        assert_eq!(form.effective_category(), "Utility");
+    }
+
+    #[test]
+    fn category_selection_flag_defaults_to_false() {
+        assert!(!SidePanelFormState::default().category_user_selected);
     }
 }

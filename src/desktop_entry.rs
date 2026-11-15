@@ -340,6 +340,7 @@ mod tests {
             categories: None,
             startup_notify: true,
             asset_preference: None,
+            added_at: None,
         }
     }
 
@@ -356,6 +357,23 @@ mod tests {
         assert!(content.contains("Comment=Sony PS2 Emulator\n"));
         assert!(content.contains("Categories=Game;Emulator;\n"));
         assert!(content.contains("StartupNotify=true\n"));
+    }
+
+    #[test]
+    fn desktop_file_content_uses_single_selected_category() {
+        let mut app = sample_app(vec![]);
+        app.categories = Some("Graphics;".into());
+        let content = desktop_file_content(&app);
+        assert!(content.contains("Categories=Graphics;\n"));
+        assert!(!content.contains("Categories=Utility;"));
+    }
+
+    #[test]
+    fn desktop_file_content_adds_missing_trailing_semicolon() {
+        let mut app = sample_app(vec![]);
+        app.categories = Some("AudioVideo".into());
+        let content = desktop_file_content(&app);
+        assert!(content.contains("Categories=AudioVideo;\n"));
     }
 
     #[test]

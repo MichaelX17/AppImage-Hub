@@ -2,12 +2,29 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub applications: Vec<AppEntry>,
     #[serde(default)]
     pub custom_download_dir: Option<PathBuf>,
+    /// Whether to check GitHub for new releases automatically on startup.
+    #[serde(default = "default_auto_check_updates")]
+    pub auto_check_updates: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            applications: Vec::new(),
+            custom_download_dir: None,
+            auto_check_updates: default_auto_check_updates(),
+        }
+    }
+}
+
+fn default_auto_check_updates() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +48,9 @@ pub struct AppEntry {
     pub startup_notify: bool,
     #[serde(default)]
     pub asset_preference: Option<String>,
+    /// Unix timestamp for when the app was added. Older configs may omit it.
+    #[serde(default)]
+    pub added_at: Option<i64>,
 }
 
 fn default_startup_notify() -> bool {

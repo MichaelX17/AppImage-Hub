@@ -11,6 +11,7 @@
 - Single-viewport egui app; state lives in one `ManagerApp` struct; UI and IO are split by a background OS thread running a Tokio runtime, connected by two `tokio::mpsc` channels.
 - Persistent config is TOML (`~/.config/appimage-manager/config.toml`); managed binaries under `~/.local/share/appimage-manager/apps/<name>-<id8>/`.
 - Downloads stream to a sibling `.new` file, `chmod 0o755`, then `rename()` (atomic replace).
+- AppImages are stored under the **user-typed name** (`example.appimage`), and each app folder carries a **JSON sidecar** (`example.json`) holding its metadata, read back on re-import.
 - `src/app.rs` is a 1,989-line god-module (state + UI orchestration + backend worker); all rendering lives in `src/ui/*`.
 - No license declared (no `LICENSE`, no `license` field in `Cargo.toml`) — **UNKNOWN**.
 
@@ -27,6 +28,7 @@
 | octocrab | 0.43.0 | GitHub REST (latest release/assets) |
 | rustls | 0.23.46 (`ring,std,tls12`) | Crypto provider installed once in `github::ensure_crypto_provider` |
 | serde / toml | 1.0.229 / 0.8.23 | Config (de)serialization |
+| serde_json | 1.0.154 | Per-AppImage metadata sidecar (`<name>.json`) |
 | async_downloader | 0.1.0 | **Declared but unused**; drags egui 0.34.3 + reqwest 0.13.5 duplicates |
 | dirs / rfd | 5.0.1 / 0.15.4 | XDG dirs / native file dialogs |
 | anyhow | 1.0.104 | Error handling throughout |
@@ -39,15 +41,16 @@
 | Path (lines) | Purpose | Key symbols |
 |---|---|---|
 | `src/main.rs` (39) | Entry: viewport 1270×802 (min 480×360), `app_id "appimage-hub"`, icon from `assets/logo.png`, persistence `~/.config/appimage-manager/window_state.json` | `main() -> eframe::Result<()>` |
-| `src/app.rs` (1989) | State + orchestration + backend worker | `ManagerApp`, `BackendCommand`, `BackendEvent`, `OpKind`, `ActiveOp`, `FailedOp`, `RetryAction`, `AppDownloadState`, `AddToState`, `setup_custom_style`, `spawn_backend`, `sanitize_asset_filename` |
+| `src/app.rs` (2235) | State + orchestration + backend worker | `ManagerApp`, `BackendCommand`, `BackendEvent`, `OpKind`, `ActiveOp`, `FailedOp`, `RetryAction`, `AppDownloadState`, `AddToState`, `setup_custom_style`, `spawn_backend`, `sync_metadata_files` |
 | `src/appimage.rs` (444) | Extract `.desktop` metadata + icon from an AppImage (runs `--appimage-extract`, falls back to `7z`) | `AppImageMetadata`, `DesktopFileMetadata`, `extract_metadata`, `extract_icon`, `parse_desktop_entry`, `map_kde_category`, `detect_image_extension`, `icon_cache_dir`, `TempDirGuard` |
 | `src/config.rs` (80) | TOML persistence model | `Config`, `AppEntry`, `AppSource` (tagged `type`; `LocalOnly`/`LocalWithRepo`/`GithubOnly`), `Config::load/save/config_path` |
+| `src/appmeta.rs` (305) | JSON sidecar beside each AppImage (`<name>.json` ↔ `<name>.appimage`) | `AppMetadataFile`, `SCHEMA_VERSION`, `from_entry`, `to_entry`, `sidecar_path`, `write_for_entry`, `read`, `read_for_appimage`, `remove_for_entry` |
 | `src/desktop_entry.rs` (425) | `.desktop` generation, menu/desktop install, legacy cleanup, cache refresh, self-registration | `quote_exec_arg`, `build_exec`, `desktop_filename`, `desktop_file_content`, `write_entry`, `remove_entry`, `write_menu_entry`, `write_desktop_shortcut`, `ensure_hub_desktop_entry` |
 | `src/downloader.rs` (213) | Streaming download w/ cancel + atomic swap | `temp_path_for`, `atomic_replace`, `download_to_path_with_progress`, `DownloadProgressInfo` |
 | `src/github.rs` (343) | Repo normalization, asset filtering/scoring | `ensure_crypto_provider`, `normalize_repo`, `ReleaseInfo`, `GithubAssetInfo`, `is_valid_appimage_asset`, `score_asset`, `fetch_available_appimages`, `fetch_latest_release_with_selector` |
 | `src/launcher.rs` (11) | Direct exec (no shell) | `launch(&Path, &[String]) -> Result<ExitStatus>` |
 | `src/permissions.rs` (16) | `chmod 0o755` (no-op off Unix) | `set_executable` |
-| `src/xdg.rs` (107) | XDG path resolution, managed folders, name sanitizing | `desktop_dir`, `applications_dir`, `managed_apps_dir`, `sanitize_name`, `managed_app_folder(_in)`, `is_path_in_managed_apps` |
+| `src/xdg.rs` (171) | XDG path resolution, managed folders, clean file names | `desktop_dir`, `applications_dir`, `managed_apps_dir`, `sanitize_name`, `slug`, `managed_appimage_filename`, `managed_app_folder(_in)`, `is_path_in_managed_apps` |
 | `src/ui/mod.rs` (7) | Module decls | — |
 | `src/ui/app_list.rs` (752) | App card list (responsive), progress/failed/idle action states | `render`, `render_app_card`, `CardActions`, `CardLayout`, `card_layout_params`, `render_actions`, `render_icon` |
 | `src/ui/side_panel.rs` (754) | Add/Edit form + "Add to.." panel | `SidePanelMode`, `AssetSelectionMode`, `SidePanelFormState`, `KDE_CATEGORIES`, `render`, `render_add_to`, `validation_message`, `draw_accent_rail` |
@@ -72,6 +75,7 @@
 - **UI threading hints:** `ctx.request_repaint_after(200ms)` only while ops are active.
 - Style is re-applied every frame: `theme::apply_style(ctx, self.compact_mode)`.
 - Layout class is recomputed per frame: `SizeClass::from_width(ctx.screen_rect().width())`.
+- **Sidecar lifecycle:** `appmeta::write_for_entry` runs after every add / edit / install / update; `read_for_appimage` is preferred over AppImage extraction when the user browses a file that already has one. `sync_metadata_files()` runs at startup: it back-fills missing sidecars and adopts managed folders whose sidecar is not yet in `config.toml`.
 - UI never owns config writes directly — mutations lock, mutate, `cfg.save()` (sync IO on UI thread).
 
 ## 5. GUI Layout & Interaction
@@ -106,8 +110,8 @@ impl ManagerApp {
   pub(crate) fn close_add_to(&mut self);
   pub(crate) fn check_all_updates(&mut self);
   pub(crate) fn update_all(&mut self);
-  pub(crate) fn start_update_download(&mut self, app_id: String, url: String, tag: String, asset_name: String);
-  pub(crate) fn start_install_from_repo(&mut self, github_repo: String, display_name: String, asset_name: Option<String>);
+  pub(crate) fn start_update_download(&mut self, app_id: String, url: String, tag: String);
+  pub(crate) fn start_install_from_repo(&mut self, github_repo: String, display_name: String, asset_name: Option<String>, categories: Option<String>);
   pub(crate) fn retry_failed(&mut self, idx: usize);
   pub(crate) fn cancel_op(&self, op_id: &str);
   pub(crate) fn app_download_state(&self, app_id: &str) -> AppDownloadState<'_>;
@@ -132,6 +136,18 @@ pub fn parse_desktop_entry(&str) -> DesktopFileMetadata
 pub fn map_kde_category(&str) -> (String, bool)
 pub fn detect_image_extension(&[u8]) -> &'static str
 pub fn icon_cache_dir() -> Result<PathBuf>
+
+// appmeta.rs
+pub const SCHEMA_VERSION: u32
+pub struct AppMetadataFile { schema, id, display_name, generic_name, comment, categories,
+                             startup_notify, args, source, current_version, asset_preference,
+                             file, icon }
+impl AppMetadataFile { pub fn from_entry(&AppEntry) -> Self; pub fn to_entry(&self, PathBuf) -> AppEntry }
+pub fn sidecar_path(appimage: &Path) -> PathBuf
+pub fn write_for_entry(entry: &AppEntry) -> Result<PathBuf>
+pub fn read(path: &Path) -> Result<AppMetadataFile>
+pub fn read_for_appimage(appimage: &Path) -> Option<AppMetadataFile>
+pub fn remove_for_entry(entry: &AppEntry)
 
 // github.rs
 pub fn ensure_crypto_provider()
@@ -158,6 +174,7 @@ pub fn desktop_dir() / applications_dir() / managed_apps_dir() -> Result<PathBuf
 pub fn sanitize_name(&str) -> String
 pub fn managed_app_folder(hint: &str, id: &str) -> Result<PathBuf>
 pub fn managed_app_folder_in(base: &Path, hint: &str, id: &str) -> Result<PathBuf>
+pub fn managed_appimage_filename(display_name: &str, fallback: &str) -> String
 pub fn is_path_in_managed_apps(&Path) -> bool
 
 // launcher.rs / permissions.rs
@@ -190,6 +207,8 @@ No fonts, themes, shaders, or config assets are bundled.
 - Theming must go through `ui::theme` constants/helpers, never ad-hoc `Color32` in views.
 - `.desktop` filenames are derived from the sanitized display name; legacy `<uuid>.desktop` files are always removed when writing/removing (dual-path cleanup).
 - Download invariant: never write directly to the target — use `temp_path_for` + `atomic_replace`; the temp file must be a sibling (same filesystem).
+- File-name invariant: a managed AppImage is always `<slug(display_name)>.appimage` (`xdg::managed_appimage_filename`); updates swap bytes in place and never adopt the upstream asset name. `slug()` returns `""` for empty input while `sanitize_name()` substitutes `"app"`.
+- Metadata invariant: whenever `AppEntry` changes, `appmeta::write_for_entry` must run so `<name>.json` stays in sync; sidecar reads are best-effort and never fatal.
 - Filesystem side effects that fail are usually best-effort (`let _ = …`) unless the user must know (status message).
 - External binaries are optional and invoked via `std::process::Command` with stdout/stderr suppressed: `xdg-user-dir`, `update-desktop-database`, `kbuildsycoca6/5`, `gio`, `7z`, `xdg-open`, `notify-send`.
 - Tests are inline `#[cfg(test)] mod tests`; two tests hit the real network.

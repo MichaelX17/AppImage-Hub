@@ -1,3 +1,4 @@
+use crate::appmeta;
 use crate::config::{AppEntry, AppSource, Config};
 use crate::desktop_entry;
 use crate::downloader;
@@ -7,7 +8,7 @@ use crate::permissions;
 use crate::ui::breakpoints::SizeClass;
 use crate::xdg;
 use eframe::egui::{self, RichText};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -25,7 +26,6 @@ pub enum BackendCommand {
         app_id: String,
         url: String,
         tag: String,
-        asset_name: String,
         cancel: Arc<AtomicBool>,
     },
     InstallFromRepo {
@@ -33,6 +33,9 @@ pub enum BackendCommand {
         github_repo: String,
         display_name: String,
         asset_name: Option<String>,
+        /// Desktop category selected in the UI, already `;`-terminated.
+        /// Takes precedence over anything detected inside the AppImage.
+        categories: Option<String>,
         cancel: Arc<AtomicBool>,
     },
     FetchRepoAssets {
@@ -103,6 +106,43 @@ pub enum OpKind {
     Update,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AppSortBy {
+    #[default]
+    Name,
+    Size,
+    DateAdded,
+    Github,
+    Local,
+}
+
+impl AppSortBy {
+    pub const ALL: [Self; 5] = [
+        Self::Name,
+        Self::Size,
+        Self::DateAdded,
+        Self::Github,
+        Self::Local,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Name => "Name",
+            Self::Size => "Size",
+            Self::DateAdded => "Date added",
+            Self::Github => "GitHub",
+            Self::Local => "Local",
+        }
+    }
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ActiveOp {
@@ -125,12 +165,12 @@ pub enum RetryAction {
         github_repo: String,
         display_name: String,
         asset_name: Option<String>,
+        categories: Option<String>,
     },
     DownloadAndReplace {
         app_id: String,
         url: String,
         tag: String,
-        asset_name: String,
     },
 }
 
@@ -173,7 +213,13 @@ pub struct ManagerApp {
     pub(crate) add_to: Option<AddToState>,
     pub(crate) side_panel_width: f32,
     pub(crate) show_side_panel: bool,
-    pub(crate) compact_mode: bool,
+    /// True until the user picks where AppImages should be stored.
+    first_run_setup: bool,
+    /// When the last GitHub update check completed (drives the footer label).
+    pub(crate) last_checked: Option<Instant>,
+    /// Guards the one-shot auto-check performed on startup.
+    pub(crate) auto_check_done: bool,
+    pub(crate) sort_by: AppSortBy,
 }
 
 pub fn setup_custom_style(ctx: &egui::Context) {
@@ -200,12 +246,10 @@ impl ManagerApp {
             .clamp(360.0, 520.0);
         let show_side_panel = true;
         let is_form_open = true;
-        let compact_mode = cc
-            .storage
-            .and_then(|s| s.get_string("compact_mode"))
-            .map(|v| v == "true")
-            .unwrap_or(false);
-
+        let first_run_setup = config
+            .lock()
+            .map(|cfg| cfg.custom_download_dir.is_none() && cfg.applications.is_empty())
+            .unwrap_or(true);
         let (cmd_tx, cmd_rx) = mpsc::channel::<BackendCommand>(64);
         let (evt_tx, evt_rx) = mpsc::channel::<BackendEvent>(256);
         spawn_backend(config.clone(), cmd_rx, evt_tx);
@@ -225,10 +269,100 @@ impl ManagerApp {
             add_to: None,
             side_panel_width,
             show_side_panel,
-            compact_mode,
+            first_run_setup,
+            last_checked: None,
+            auto_check_done: false,
+            sort_by: AppSortBy::Name,
         };
-        app.repair_missing_icons();
+        if !app.first_run_setup {
+            app.repair_missing_icons();
+            app.normalize_managed_filenames();
+            app.sync_metadata_files();
+        }
         app
+    }
+
+    fn finish_first_run_setup(&mut self, apps_dir: PathBuf) {
+        if let Err(e) = std::fs::create_dir_all(&apps_dir) {
+            self.status = Some(format!("failed to create AppImage folder: {e:#}"));
+            return;
+        }
+        let saved = self
+            .config
+            .lock()
+            .map(|mut cfg| {
+                cfg.custom_download_dir = Some(apps_dir.clone());
+                cfg.save()
+            })
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("config lock poisoned")));
+        if let Err(e) = saved {
+            self.status = Some(format!("failed to save AppImage folder: {e:#}"));
+            return;
+        }
+
+        self.first_run_setup = false;
+        self.repair_missing_icons();
+        self.normalize_managed_filenames();
+        let found = self.sync_metadata_files();
+        self.status = Some(if found > 0 {
+            format!(
+                "AppImages will be stored in {}. Found {found} existing app(s).",
+                apps_dir.display()
+            )
+        } else {
+            format!("AppImages will be stored in {}", apps_dir.display())
+        });
+    }
+
+    fn render_first_run_setup(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(crate::ui::theme::BG))
+            .show(ctx, |ui| {
+                ui.add_space((ui.available_height() * 0.16).clamp(32.0, 120.0));
+                ui.vertical_centered(|ui| {
+                    ui.add(
+                        egui::Image::new(egui::include_image!("../assets/logo.png"))
+                            .fit_to_exact_size(egui::vec2(96.0, 96.0))
+                            .corner_radius(egui::CornerRadius::same(20)),
+                    );
+                    ui.add_space(crate::ui::theme::SPACE_MD);
+                    ui.label(
+                        RichText::new("AppImage Hub")
+                            .size(28.0)
+                            .strong()
+                            .color(crate::ui::theme::TEXT_PRIMARY),
+                    );
+                    ui.add_space(crate::ui::theme::SPACE_SM);
+                    ui.label(
+                        crate::ui::theme::secondary_label(
+                            "Choose where your AppImages should be stored.",
+                        )
+                        .size(14.0),
+                    );
+                    ui.add_space(crate::ui::theme::SPACE_XL);
+
+                    if ui
+                        .add_sized([190.0, 44.0], crate::ui::theme::primary_button("Browse"))
+                        .clicked()
+                    {
+                        if let Some(dir) = rfd::FileDialog::new()
+                            .set_title("Choose AppImage storage folder")
+                            .pick_folder()
+                        {
+                            self.finish_first_run_setup(dir);
+                        }
+                    }
+
+                    ui.add_space(crate::ui::theme::SPACE_SM);
+                    if ui
+                        .add_sized([140.0, 38.0], crate::ui::theme::ghost_button("Default"))
+                        .on_hover_text(format!("Use {}", xdg::default_managed_apps_dir().display()))
+                        .clicked()
+                    {
+                        self.finish_first_run_setup(xdg::default_managed_apps_dir());
+                    }
+                });
+            });
     }
 
     pub(crate) fn send_cmd(&mut self, cmd: BackendCommand) {
@@ -287,10 +421,12 @@ impl ManagerApp {
                 url,
                 asset_name,
             } => {
+                self.last_checked = Some(Instant::now());
                 self.latest_versions.insert(app_id.clone(), tag.clone());
                 self.update_available.insert(app_id, (tag, url, asset_name));
             }
             BackendEvent::UpToDate { app_id, tag } => {
+                self.last_checked = Some(Instant::now());
                 self.latest_versions.insert(app_id.clone(), tag);
                 self.update_available.remove(&app_id);
             }
@@ -396,6 +532,7 @@ impl ManagerApp {
         github_repo: String,
         display_name: String,
         asset_name: Option<String>,
+        categories: Option<String>,
     ) {
         let op_id = Uuid::new_v4().to_string();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -422,6 +559,7 @@ impl ManagerApp {
                     github_repo: github_repo.clone(),
                     display_name: display_name.clone(),
                     asset_name: asset_name.clone(),
+                    categories: categories.clone(),
                 }),
             },
         );
@@ -430,17 +568,12 @@ impl ManagerApp {
             github_repo,
             display_name,
             asset_name,
+            categories,
             cancel,
         });
     }
 
-    pub(crate) fn start_update_download(
-        &mut self,
-        app_id: String,
-        url: String,
-        tag: String,
-        asset_name: String,
-    ) {
+    pub(crate) fn start_update_download(&mut self, app_id: String, url: String, tag: String) {
         let op_id = Uuid::new_v4().to_string();
         let cancel = Arc::new(AtomicBool::new(false));
         let label = format!("Update {}", self.app_display_name(&app_id));
@@ -462,7 +595,6 @@ impl ManagerApp {
                     app_id: app_id.clone(),
                     url: url.clone(),
                     tag: tag.clone(),
-                    asset_name: asset_name.clone(),
                 }),
             },
         );
@@ -471,7 +603,6 @@ impl ManagerApp {
             app_id,
             url,
             tag,
-            asset_name,
             cancel,
         });
     }
@@ -489,6 +620,7 @@ impl ManagerApp {
             let _ = cfg.save();
         }
         if let Some(entry) = removed {
+            appmeta::remove_for_entry(&entry);
             if let (Ok(d), Ok(a)) = (xdg::desktop_dir(), xdg::applications_dir()) {
                 let _ = desktop_entry::remove_entry(&entry, &d, &a);
             }
@@ -560,6 +692,7 @@ impl ManagerApp {
             comment: entry.comment.clone().unwrap_or_default(),
             category,
             custom_category,
+            category_user_selected: true,
             startup_notify: entry.startup_notify,
             mode,
             local_path: entry.local_path.display().to_string(),
@@ -592,13 +725,13 @@ impl ManagerApp {
                     github_repo,
                     display_name,
                     asset_name,
-                } => self.start_install_from_repo(github_repo, display_name, asset_name),
-                RetryAction::DownloadAndReplace {
-                    app_id,
-                    url,
-                    tag,
-                    asset_name,
-                } => self.start_update_download(app_id, url, tag, asset_name),
+                    categories,
+                } => {
+                    self.start_install_from_repo(github_repo, display_name, asset_name, categories)
+                }
+                RetryAction::DownloadAndReplace { app_id, url, tag } => {
+                    self.start_update_download(app_id, url, tag)
+                }
             }
         }
     }
@@ -760,21 +893,6 @@ impl ManagerApp {
         let show_actions_inline = matches!(size_class, SizeClass::Large);
         let tight = matches!(size_class, SizeClass::Tight);
 
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::Image::new(egui::include_image!("../assets/logo.png"))
-                    .fit_to_exact_size(egui::vec2(28.0, 28.0))
-                    .corner_radius(egui::CornerRadius::same(6)),
-            );
-            ui.add_space(6.0);
-            if tight {
-                ui.label(RichText::new("AIM").size(22.0).strong())
-                    .on_hover_text(full_brand);
-            } else {
-                ui.label(RichText::new(full_brand).size(22.0).strong());
-            }
-        });
-
         let effective_download_dir = self
             .config
             .lock()
@@ -786,76 +904,119 @@ impl ManagerApp {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "unavailable".into());
 
-        if show_actions_inline {
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::Image::new(egui::include_image!("../assets/logo.png"))
+                    .fit_to_exact_size(egui::vec2(28.0, 28.0))
+                    .corner_radius(egui::CornerRadius::same(6)),
+            );
+            ui.add_space(6.0);
+            if tight {
+                ui.label(
+                    RichText::new("AIM")
+                        .size(22.0)
+                        .strong()
+                        .color(crate::ui::theme::TEXT_PRIMARY),
+                )
+                .on_hover_text(full_brand);
+            } else {
+                ui.label(
+                    RichText::new(full_brand)
+                        .size(22.0)
+                        .strong()
+                        .color(crate::ui::theme::TEXT_PRIMARY),
+                );
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let add_clicked = ui.add(crate::ui::theme::primary_button("Add")).clicked();
-                if add_clicked {
-                    self.open_add_form();
-                }
+                self.render_toolbar_actions(ui, show_actions_inline, &download_dir_text);
+            });
+        });
 
-                let updates_count = self.updates_available_count();
-                let has_active_downloads = !self.ops.is_empty();
-                let update_all_label = if updates_count > 0 {
-                    format!("Update All ({})", updates_count)
+        // Breadcrumb row: painted folder icon + shortened download path.
+        if !tight {
+            ui.add_space(2.0);
+            crate::ui::theme::breadcrumb(ui, &download_dir_text, crate::ui::theme::ACCENT_HOVER)
+                .on_hover_text(format!("Download folder: {download_dir_text}"));
+        }
+    }
+
+    fn render_toolbar_actions(&mut self, ui: &mut egui::Ui, inline: bool, download_dir_text: &str) {
+        if inline {
+            // Primary "Add" action: neon pill with a hover glow.
+            let add = ui.add(crate::ui::theme::add_button("+ Add AppImage"));
+            if add.hovered() {
+                crate::ui::theme::draw_glow(
+                    ui,
+                    add.rect,
+                    crate::ui::theme::RADIUS_PILL,
+                    crate::ui::theme::ACCENT,
+                );
+            }
+            if add.clicked() {
+                self.open_add_form();
+            }
+
+            let updates_count = self.updates_available_count();
+            let has_active_downloads = !self.ops.is_empty();
+            let update_all_label = if updates_count > 0 {
+                format!("Update All ({})", updates_count)
+            } else {
+                "Update All".to_string()
+            };
+            let update_all_clicked = ui
+                .add_enabled(
+                    !has_active_downloads && updates_count > 0,
+                    crate::ui::theme::ghost_button(update_all_label),
+                )
+                .on_disabled_hover_text(if has_active_downloads {
+                    "Wait for active downloads to finish"
                 } else {
-                    "Update All".to_string()
-                };
-                let update_all_clicked = ui
-                    .add_enabled(
-                        !has_active_downloads && updates_count > 0,
-                        crate::ui::theme::ghost_button(update_all_label),
-                    )
-                    .on_disabled_hover_text(if has_active_downloads {
-                        "Wait for active downloads to finish"
-                    } else {
-                        "No updates available"
-                    })
-                    .clicked();
-                if update_all_clicked {
-                    self.update_all();
-                }
+                    "No updates available"
+                })
+                .clicked();
+            if update_all_clicked {
+                self.update_all();
+            }
 
-                let check_clicked = ui
-                    .add(crate::ui::theme::secondary_button("Check All Updates"))
-                    .clicked();
-                if check_clicked {
-                    self.check_all_updates();
-                }
+            let check_clicked = ui
+                .add(crate::ui::theme::secondary_button("Check All Updates"))
+                .clicked();
+            if check_clicked {
+                self.check_all_updates();
+            }
 
-                ui.add_space(4.0);
-                let browse_clicked = ui
-                    .add(crate::ui::theme::secondary_button("Browse"))
-                    .on_hover_text("Choose custom download folder for GitHub installs")
-                    .clicked();
-                if browse_clicked {
-                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                        if let Ok(mut cfg) = self.config.lock() {
-                            cfg.custom_download_dir = Some(p);
-                            let _ = cfg.save();
-                        }
+            ui.add_space(4.0);
+            let browse_clicked = ui
+                .add(crate::ui::theme::secondary_button("Browse"))
+                .on_hover_text("Choose custom download folder for GitHub installs")
+                .clicked();
+            if browse_clicked {
+                if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                    if let Ok(mut cfg) = self.config.lock() {
+                        cfg.custom_download_dir = Some(p);
+                        let _ = cfg.save();
+                    }
+                    let found = self.sync_metadata_files();
+                    if found > 0 {
+                        self.status = Some(format!(
+                            "Found {found} existing app(s) in the selected folder."
+                        ));
                     }
                 }
-
-                ui.checkbox(&mut self.compact_mode, "Compact");
-
-                ui.add(
-                    egui::Label::new(crate::ui::theme::secondary_label(download_dir_text.clone()))
-                        .truncate(),
-                )
-                .on_hover_text(download_dir_text.clone());
-            });
+            }
         } else {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(crate::ui::theme::primary_button("Add")).clicked() {
+                if ui.add(crate::ui::theme::add_button("+ Add")).clicked() {
                     self.open_add_form();
                 }
                 ui.menu_button("Actions", |ui| {
                     ui.label(crate::ui::theme::secondary_label("Download folder:").small());
                     ui.add(
-                        egui::Label::new(crate::ui::theme::muted_label(download_dir_text.clone()))
+                        egui::Label::new(crate::ui::theme::muted_label(download_dir_text))
                             .truncate(),
                     )
-                    .on_hover_text(download_dir_text.clone());
+                    .on_hover_text(download_dir_text);
                     ui.separator();
                     let browse_clicked = ui.button("Browse download folder").clicked();
                     if browse_clicked {
@@ -863,6 +1024,12 @@ impl ManagerApp {
                             if let Ok(mut cfg) = self.config.lock() {
                                 cfg.custom_download_dir = Some(p);
                                 let _ = cfg.save();
+                            }
+                            let found = self.sync_metadata_files();
+                            if found > 0 {
+                                self.status = Some(format!(
+                                    "Found {found} existing app(s) in the selected folder."
+                                ));
                             }
                         }
                         ui.close_menu();
@@ -891,9 +1058,6 @@ impl ManagerApp {
                         self.update_all();
                         ui.close_menu();
                     }
-
-                    ui.separator();
-                    ui.checkbox(&mut self.compact_mode, "Compact mode");
                 });
             });
         }
@@ -925,19 +1089,41 @@ impl ManagerApp {
         if !self.ops.is_empty() {
             return;
         }
-        let updates: Vec<(String, String, String, String)> = self
+        let updates: Vec<(String, String, String)> = self
             .update_available
             .iter()
-            .map(|(app_id, (tag, url, asset_name))| {
-                (app_id.clone(), tag.clone(), url.clone(), asset_name.clone())
-            })
+            .map(|(app_id, (tag, url, _asset))| (app_id.clone(), tag.clone(), url.clone()))
             .collect();
-        for (app_id, tag, url, asset_name) in updates {
-            self.start_update_download(app_id, url, tag, asset_name);
+        for (app_id, tag, url) in updates {
+            self.start_update_download(app_id, url, tag);
+        }
+    }
+
+    /// Whether automatic update checks on startup are enabled (persisted in config).
+    pub(crate) fn auto_check_enabled(&self) -> bool {
+        self.config
+            .lock()
+            .map(|c| c.auto_check_updates)
+            .unwrap_or(true)
+    }
+
+    /// Persist the auto-check toggle (a failed config save must never break the UI).
+    pub(crate) fn set_auto_check_enabled(&mut self, enabled: bool) {
+        if let Ok(mut cfg) = self.config.lock() {
+            if cfg.auto_check_updates != enabled {
+                cfg.auto_check_updates = enabled;
+                let _ = cfg.save();
+            }
         }
     }
 
     pub(crate) fn auto_populate_from_appimage(&mut self, appimage_path: &Path) {
+        // A sidecar written beside the AppImage is authoritative and avoids
+        // re-executing the AppImage just to read its metadata again.
+        if let Some(meta) = appmeta::read_for_appimage(appimage_path) {
+            self.apply_sidecar_metadata(appimage_path, &meta);
+            return;
+        }
         if let Ok(meta) = crate::appimage::extract_metadata(appimage_path, None) {
             let stem = appimage_path
                 .file_stem()
@@ -966,12 +1152,16 @@ impl ManagerApp {
                 }
             }
 
-            if let Some(cat) = meta.matched_category {
-                if meta.is_custom_category {
-                    self.side_panel_form.category = "Custom".to_string();
-                    self.side_panel_form.custom_category = cat;
-                } else {
-                    self.side_panel_form.category = cat;
+            // Only auto-fill the category when the user has not chosen one:
+            // an explicit selection must always survive metadata detection.
+            if !self.side_panel_form.category_user_selected {
+                if let Some(cat) = meta.matched_category {
+                    if meta.is_custom_category {
+                        self.side_panel_form.category = "Custom".to_string();
+                        self.side_panel_form.custom_category = cat;
+                    } else {
+                        self.side_panel_form.category = cat;
+                    }
                 }
             }
 
@@ -982,6 +1172,91 @@ impl ManagerApp {
             if let Some(icon_p) = meta.icon_path {
                 self.side_panel_form.icon_path = icon_p.display().to_string();
             }
+        }
+    }
+
+    /// Fills the Add form from the JSON sidecar stored beside an AppImage.
+    fn apply_sidecar_metadata(&mut self, appimage_path: &Path, meta: &appmeta::AppMetadataFile) {
+        let stem = appimage_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+
+        if (self.side_panel_form.display_name.trim().is_empty()
+            || self.side_panel_form.display_name.trim() == stem)
+            && !meta.display_name.trim().is_empty()
+        {
+            self.side_panel_form.display_name = meta.display_name.trim().to_string();
+        }
+
+        if self.side_panel_form.generic_name.trim().is_empty() {
+            if let Some(generic) = &meta.generic_name {
+                self.side_panel_form.generic_name = generic.clone();
+            }
+        }
+
+        if self.side_panel_form.comment.trim().is_empty() {
+            if let Some(comment) = &meta.comment {
+                self.side_panel_form.comment = comment.clone();
+            }
+        }
+
+        if !self.side_panel_form.category_user_selected {
+            if let Some(raw) = meta.categories.as_deref() {
+                let cat = raw.trim().trim_end_matches(';').trim();
+                if !cat.is_empty() {
+                    if let Some((_, value)) = crate::ui::side_panel::KDE_CATEGORIES
+                        .iter()
+                        .find(|(_, value)| *value == cat)
+                    {
+                        self.side_panel_form.category = (*value).to_string();
+                        self.side_panel_form.custom_category.clear();
+                    } else {
+                        self.side_panel_form.category = "Custom".to_string();
+                        self.side_panel_form.custom_category = cat.to_string();
+                    }
+                }
+            }
+        }
+
+        self.side_panel_form.startup_notify = meta.startup_notify;
+
+        if self.side_panel_form.launch_args.trim().is_empty() && !meta.args.is_empty() {
+            self.side_panel_form.launch_args = meta.args.join(" ");
+        }
+
+        if self.side_panel_form.icon_path.trim().is_empty() {
+            if let Some(icon) = meta.icon.as_deref() {
+                let icon = icon.trim();
+                if !icon.is_empty() {
+                    let path = std::path::Path::new(icon);
+                    let resolved = if path.is_absolute() {
+                        path.to_path_buf()
+                    } else {
+                        appimage_path
+                            .parent()
+                            .map(|folder| folder.join(path))
+                            .unwrap_or_else(|| path.to_path_buf())
+                    };
+                    self.side_panel_form.icon_path = resolved.display().to_string();
+                }
+            }
+        }
+
+        if self.side_panel_form.github_url.trim().is_empty() {
+            if let Some(source) = &meta.source {
+                match source {
+                    AppSource::LocalWithRepo { github_repo }
+                    | AppSource::GithubOnly { github_repo } => {
+                        self.side_panel_form.github_url = github_repo.clone();
+                    }
+                    AppSource::LocalOnly => {}
+                }
+            }
+        }
+
+        if self.side_panel_form.manual_asset.is_none() {
+            self.side_panel_form.manual_asset = meta.asset_preference.clone();
         }
     }
 
@@ -1023,6 +1298,137 @@ impl ManagerApp {
         for app in apps_to_rewrite {
             let _ = write_desktop(&app);
         }
+    }
+
+    /// Renames already-managed binaries to the clean `<name>.appimage` form,
+    /// so entries added before this naming scheme also end up clean.
+    /// Idempotent: skips missing files and existing target names.
+    pub(crate) fn normalize_managed_filenames(&mut self) {
+        let custom_base = self
+            .config
+            .lock()
+            .ok()
+            .and_then(|c| c.custom_download_dir.clone());
+        let default_base = Some(xdg::default_managed_apps_dir());
+
+        let mut moves: Vec<(String, PathBuf, PathBuf)> = Vec::new();
+        if let Ok(cfg) = self.config.lock() {
+            for app in &cfg.applications {
+                if !app.local_path.exists() {
+                    continue;
+                }
+                let inside = default_base
+                    .as_ref()
+                    .map(|base| app.local_path.starts_with(base))
+                    .unwrap_or(false)
+                    || custom_base
+                        .as_ref()
+                        .map(|base| app.local_path.starts_with(base))
+                        .unwrap_or(false);
+                if !inside {
+                    continue;
+                }
+                if let Some(target) = clean_managed_path(&app.local_path, &app.display_name) {
+                    if !target.exists() {
+                        moves.push((app.id.clone(), app.local_path.clone(), target));
+                    }
+                }
+            }
+        }
+
+        let mut moved: Vec<(String, PathBuf)> = Vec::new();
+        for (id, old, new) in moves {
+            if std::fs::rename(&old, &new).is_err() {
+                continue;
+            }
+            // Drop the sidecar that belonged to the previous file name.
+            let _ = std::fs::remove_file(appmeta::sidecar_path(&old));
+            moved.push((id, new));
+        }
+        if moved.is_empty() {
+            return;
+        }
+
+        let mut rewritten: Vec<AppEntry> = Vec::new();
+        if let Ok(mut cfg) = self.config.lock() {
+            for (id, new_path) in &moved {
+                if let Some(entry) = cfg.applications.iter_mut().find(|a| &a.id == id) {
+                    entry.local_path = new_path.clone();
+                    rewritten.push(entry.clone());
+                }
+            }
+            let _ = cfg.save();
+        }
+        for entry in &rewritten {
+            let _ = write_desktop(entry);
+            let _ = appmeta::write_for_entry(entry);
+        }
+    }
+
+    fn app_storage_dir(&self) -> PathBuf {
+        self.config
+            .lock()
+            .ok()
+            .and_then(|cfg| cfg.custom_download_dir.clone())
+            .unwrap_or_else(xdg::default_managed_apps_dir)
+    }
+
+    /// Keeps `<name>.json` sidecars in sync with the config, and scans the
+    /// selected storage folder for existing AppImages that are missing from
+    /// `config.toml` (for example after choosing a folder with previous apps).
+    pub(crate) fn sync_metadata_files(&mut self) -> usize {
+        let mut known_ids: HashSet<String> = HashSet::new();
+        let mut known_paths: HashSet<PathBuf> = HashSet::new();
+        let mut missing: Vec<AppEntry> = Vec::new();
+
+        if let Ok(cfg) = self.config.lock() {
+            for app in &cfg.applications {
+                known_ids.insert(app.id.clone());
+                known_paths.insert(app.local_path.clone());
+                if app.local_path.exists() && appmeta::read_for_appimage(&app.local_path).is_none()
+                {
+                    missing.push(app.clone());
+                }
+            }
+        }
+        for app in missing {
+            let _ = appmeta::write_for_entry(&app);
+        }
+
+        let base = self.app_storage_dir();
+        let mut appimages = Vec::new();
+        collect_appimages(&base, &mut appimages, 0);
+
+        let mut adopted: Vec<AppEntry> = Vec::new();
+        for appimage in appimages {
+            if known_paths.contains(&appimage) {
+                continue;
+            }
+            let entry = if let Some(meta) = appmeta::read_for_appimage(&appimage) {
+                meta.to_entry(appimage.clone())
+            } else {
+                app_entry_from_appimage(&appimage)
+            };
+            if known_ids.contains(&entry.id) {
+                continue;
+            }
+            known_ids.insert(entry.id.clone());
+            known_paths.insert(appimage);
+            adopted.push(entry);
+        }
+
+        if adopted.is_empty() {
+            return 0;
+        }
+        if let Ok(mut cfg) = self.config.lock() {
+            cfg.applications.extend(adopted.iter().cloned());
+            let _ = cfg.save();
+        }
+        for entry in &adopted {
+            let _ = write_desktop(entry);
+            let _ = appmeta::write_for_entry(entry);
+        }
+        adopted.len()
     }
 
     pub(crate) fn updates_available_count(&self) -> usize {
@@ -1135,6 +1541,7 @@ impl ManagerApp {
                     self.side_panel_form.clear();
                     return;
                 }
+                let _ = appmeta::write_for_entry(&e);
             }
             self.is_form_open = false;
             self.side_panel_form.clear();
@@ -1185,6 +1592,7 @@ impl ManagerApp {
                     args,
                     icon_path: final_icon_path,
                     asset_preference: None,
+                    added_at: Some(now_unix()),
                 };
                 if let Err(e) = permissions::set_executable(&managed_path) {
                     self.status = Some(format!("chmod failed: {e:#}"));
@@ -1194,6 +1602,8 @@ impl ManagerApp {
                     self.status = Some(format!("desktop entry failed: {e:#}"));
                     return;
                 }
+                // Record the metadata next to the AppImage itself.
+                let _ = appmeta::write_for_entry(&entry);
                 self.push_entry(entry);
             }
             SidePanelMode::LocalWithRepo => {
@@ -1239,6 +1649,7 @@ impl ManagerApp {
                     args,
                     icon_path: final_icon_path,
                     asset_preference,
+                    added_at: Some(now_unix()),
                 };
                 if let Err(e) = permissions::set_executable(&managed_path) {
                     self.status = Some(format!("chmod failed: {e:#}"));
@@ -1248,6 +1659,7 @@ impl ManagerApp {
                     self.status = Some(format!("desktop entry failed: {e:#}"));
                     return;
                 }
+                let _ = appmeta::write_for_entry(&entry);
                 self.push_entry(entry);
                 self.send_cmd(BackendCommand::CheckUpdate { app_id: id });
             }
@@ -1260,6 +1672,7 @@ impl ManagerApp {
                     form.github_url.trim().to_string(),
                     display_name,
                     asset_preference,
+                    categories,
                 );
             }
         }
@@ -1273,14 +1686,25 @@ impl eframe::App for ManagerApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("side_panel_width", self.side_panel_width.to_string());
         storage.set_string("show_side_panel", self.show_side_panel.to_string());
-        storage.set_string("compact_mode", self.compact_mode.to_string());
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        crate::ui::theme::apply_style(ctx, self.compact_mode);
+        crate::ui::theme::apply_style(ctx);
+        if self.first_run_setup {
+            self.render_first_run_setup(ctx);
+            return;
+        }
         let size_class = SizeClass::from_width(ctx.screen_rect().width());
         while let Ok(evt) = self.evt_rx.try_recv() {
             self.apply_event(evt);
+        }
+
+        // One-shot auto-check on startup, honouring the persisted preference.
+        if !self.auto_check_done {
+            self.auto_check_done = true;
+            if self.auto_check_enabled() {
+                self.check_all_updates();
+            }
         }
 
         egui::TopBottomPanel::top("toolbar")
@@ -1296,9 +1720,7 @@ impl eframe::App for ManagerApp {
                     .stroke(egui::Stroke::new(1.0_f32, crate::ui::theme::BORDER)),
             )
             .show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    self.render_top_bar(ui, size_class);
-                });
+                self.render_top_bar(ui, size_class);
                 let status_text = self.status.clone();
                 if let Some(status) = status_text {
                     ui.add_space(crate::ui::theme::SPACE_XS);
@@ -1335,7 +1757,7 @@ impl eframe::App for ManagerApp {
                 .resizable(true)
                 .default_width(default_width)
                 .width_range(min_panel..=max_panel)
-                .frame(egui::Frame::NONE)
+                .frame(egui::Frame::NONE.fill(crate::ui::theme::BG))
                 .show(ctx, |ui| {
                     if self.add_to.is_some() {
                         crate::ui::side_panel::render_add_to(ui, self, size_class);
@@ -1443,6 +1865,62 @@ fn resolve_final_icon(
     crate::appimage::extract_icon(managed_appimage, target_folder).ok()
 }
 
+fn collect_appimages(dir: &Path, out: &mut Vec<PathBuf>, depth: u8) {
+    if depth > 4 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_appimages(&path, out, depth + 1);
+        } else if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("appimage"))
+        {
+            out.push(path);
+        }
+    }
+}
+
+fn app_entry_from_appimage(path: &Path) -> AppEntry {
+    let folder = path.parent().unwrap_or_else(|| Path::new(""));
+    let display_name = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "AppImage".to_string());
+    let icon_path = [folder.join("icon.png"), folder.join("icon.svg")]
+        .into_iter()
+        .find(|icon| icon.exists());
+
+    AppEntry {
+        id: Uuid::new_v4().to_string(),
+        display_name,
+        generic_name: None,
+        comment: None,
+        categories: None,
+        startup_notify: true,
+        source: AppSource::LocalOnly,
+        local_path: path.to_path_buf(),
+        current_version: String::new(),
+        args: Vec::new(),
+        icon_path,
+        asset_preference: None,
+        added_at: Some(
+            path.metadata()
+                .ok()
+                .and_then(|meta| meta.created().or_else(|_| meta.modified()).ok())
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs() as i64)
+                .unwrap_or_else(now_unix),
+        ),
+    }
+}
+
 fn write_desktop(entry: &AppEntry) -> anyhow::Result<()> {
     let desktop = xdg::desktop_dir()?;
     let apps = xdg::applications_dir()?;
@@ -1460,11 +1938,13 @@ fn ensure_in_managed_folder(
     } else {
         xdg::managed_app_folder(display_name, id)?
     };
-    let filename = source_path
-        .file_name()
+    // Always store under the clean, user-typed name (`example.appimage`)
+    // rather than the upstream asset name (`example_v2.4_x86_64.AppImage`).
+    let fallback = source_path
+        .file_stem()
         .map(|s| s.to_string_lossy().to_string())
-        .filter(|s| s.to_lowercase().ends_with(".appimage"))
-        .unwrap_or_else(|| format!("{}.AppImage", xdg::sanitize_name(display_name)));
+        .unwrap_or_default();
+    let filename = xdg::managed_appimage_filename(display_name, &fallback);
     let dest = folder.join(filename);
 
     if source_path == dest {
@@ -1476,6 +1956,18 @@ fn ensure_in_managed_folder(
         let _ = std::fs::remove_file(source_path);
     }
     Ok(dest)
+}
+
+/// Clean target path for a binary that already lives in a managed app folder.
+/// Returns `None` when the name is already correct.
+fn clean_managed_path(local_path: &Path, display_name: &str) -> Option<PathBuf> {
+    let parent = local_path.parent()?;
+    let desired = parent.join(xdg::managed_appimage_filename(display_name, "app"));
+    if desired == local_path {
+        None
+    } else {
+        Some(desired)
+    }
 }
 
 fn spawn_backend(
@@ -1584,8 +2076,8 @@ fn spawn_backend(
                         app_id,
                         url,
                         tag,
-                        asset_name,
                         cancel,
+                        ..
                     } => {
                         let label = format!("Update {app_id}");
                         let _ = evt_tx
@@ -1604,15 +2096,13 @@ fn spawn_backend(
                                 .map(|a| a.local_path.clone())
                         });
                         if let Some(target) = target {
-                            let filename = sanitize_asset_filename(&asset_name);
-                            let new_target = target
-                                .parent()
-                                .map(|p| p.join(&filename))
-                                .unwrap_or_else(|| PathBuf::from(&filename));
-                            if let Some(parent) = new_target.parent() {
+                            // Keep the clean, stable file name: the new build is
+                            // swapped in place instead of adopting the upstream
+                            // asset name.
+                            if let Some(parent) = target.parent() {
                                 let _ = std::fs::create_dir_all(parent);
                             }
-                            let tmp = downloader::temp_path_for(&new_target);
+                            let tmp = downloader::temp_path_for(&target);
                             let res = downloader::download_to_path_with_progress(
                                 &http,
                                 &url,
@@ -1642,7 +2132,7 @@ fn spawn_backend(
                                             .await;
                                         continue;
                                     }
-                                    if let Err(e) = downloader::atomic_replace(&tmp, &new_target) {
+                                    if let Err(e) = downloader::atomic_replace(&tmp, &target) {
                                         let _ = std::fs::remove_file(&tmp);
                                         let _ = evt_tx
                                             .send(BackendEvent::Error {
@@ -1653,15 +2143,11 @@ fn spawn_backend(
                                             .await;
                                         continue;
                                     }
-                                    if target != new_target {
-                                        let _ = std::fs::remove_file(&target);
-                                    }
                                     let mut updated_entry: Option<AppEntry> = None;
                                     if let Ok(mut cfg) = config.lock() {
                                         if let Some(entry) =
                                             cfg.applications.iter_mut().find(|a| a.id == app_id)
                                         {
-                                            entry.local_path = new_target.clone();
                                             entry.current_version = tag.clone();
                                             if entry
                                                 .icon_path
@@ -1669,12 +2155,9 @@ fn spawn_backend(
                                                 .map(|p| !p.exists())
                                                 .unwrap_or(true)
                                             {
-                                                if let Some(folder) = new_target.parent() {
+                                                if let Some(folder) = target.parent() {
                                                     if let Ok(extracted) =
-                                                        crate::appimage::extract_icon(
-                                                            &new_target,
-                                                            folder,
-                                                        )
+                                                        crate::appimage::extract_icon(&target, folder)
                                                     {
                                                         entry.icon_path = Some(extracted);
                                                     }
@@ -1694,6 +2177,7 @@ fn spawn_backend(
                                                 })
                                                 .await;
                                         }
+                                        let _ = appmeta::write_for_entry(&entry);
                                     }
                                     let _ = evt_tx
                                         .send(BackendEvent::DownloadComplete { op_id, app_id, tag })
@@ -1734,6 +2218,7 @@ fn spawn_backend(
                         github_repo,
                         display_name,
                         asset_name,
+                        categories,
                         cancel,
                     } => {
                         let label = if display_name.trim().is_empty() {
@@ -1778,7 +2263,7 @@ fn spawn_backend(
                                 };
                                 match folder_result {
                                     Ok(folder) => {
-                                        let filename = sanitize_asset_filename(&info.asset_name);
+                                        let filename = xdg::managed_appimage_filename(&hint, "app");
                                         let target = folder.join(filename);
                                         let tmp = downloader::temp_path_for(&target);
                                         let res = downloader::download_to_path_with_progress(
@@ -1847,10 +2332,10 @@ fn spawn_backend(
                                                     comment: app_meta
                                                         .as_ref()
                                                         .and_then(|m| m.comment.clone()),
-                                                    categories: app_meta
-                                                        .as_ref()
-                                                        .and_then(|m| m.categories.clone())
-                                                        .or_else(|| Some("Utility;".to_string())),
+                                                    categories: resolve_categories(
+                                                        categories.clone(),
+                                                        app_meta.as_ref(),
+                                                    ),
                                                     startup_notify: app_meta
                                                         .as_ref()
                                                         .and_then(|m| m.startup_notify)
@@ -1861,11 +2346,14 @@ fn spawn_backend(
                                                     args: vec![],
                                                     icon_path: extracted_icon,
                                                     asset_preference: asset_name,
+                                                    added_at: Some(now_unix()),
                                                 };
                                                 let mut desktop_err: Option<String> = None;
                                                 if let Err(e) = write_desktop(&entry) {
                                                     desktop_err = Some(format!("{e:#}"));
                                                 }
+                                                // Persist the metadata beside the AppImage.
+                                                let _ = appmeta::write_for_entry(&entry);
                                                 if let Ok(mut cfg) = config.lock() {
                                                     cfg.applications.push(entry.clone());
                                                     let _ = cfg.save();
@@ -1966,24 +2454,121 @@ fn spawn_backend(
     });
 }
 
-fn sanitize_asset_filename(name: &str) -> String {
-    let base = std::path::Path::new(name)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("app.AppImage");
-    let safe: String = base
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    if safe.to_lowercase().ends_with(".appimage") {
-        safe
+/// Guarantees a single trailing `;` on an XDG `Categories=` value.
+fn ensure_trailing_semicolon(category: &str) -> String {
+    let cat = category.trim();
+    if cat.ends_with(';') {
+        cat.to_string()
     } else {
-        format!("{safe}.AppImage")
+        format!("{cat};")
+    }
+}
+
+/// Resolves the `Categories=` value written to the menu entry.
+///
+/// The category the user picked in the Add/Edit form always wins; the
+/// AppImage's own metadata is only a fallback, and `Utility;` is the last
+/// resort so a valid `.desktop` file is always produced.
+fn resolve_categories(
+    user_selected: Option<String>,
+    meta: Option<&crate::appimage::AppImageMetadata>,
+) -> Option<String> {
+    if let Some(cat) = user_selected
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
+        return Some(ensure_trailing_semicolon(cat));
+    }
+
+    if let Some(meta) = meta {
+        // Prefer the KDE-mapped primary category (e.g. "AudioVideo") over the
+        // raw XDG list, since Plasma places apps by the first known category.
+        if let Some(mapped) = meta
+            .matched_category
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
+            return Some(ensure_trailing_semicolon(mapped));
+        }
+        if let Some(raw) = meta
+            .categories
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
+            return Some(ensure_trailing_semicolon(raw));
+        }
+    }
+
+    Some("Utility;".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::appimage::AppImageMetadata;
+
+    fn meta_with(mapped: Option<&str>, raw: Option<&str>) -> AppImageMetadata {
+        AppImageMetadata {
+            matched_category: mapped.map(str::to_string),
+            categories: raw.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn user_selected_category_wins_over_metadata() {
+        let meta = meta_with(Some("Utility"), Some("Utility;"));
+        let resolved = resolve_categories(Some("Graphics;".into()), Some(&meta));
+        assert_eq!(resolved.as_deref(), Some("Graphics;"));
+    }
+
+    #[test]
+    fn user_selected_category_gets_semicolon_appended() {
+        let resolved = resolve_categories(Some("Development".into()), None);
+        assert_eq!(resolved.as_deref(), Some("Development;"));
+    }
+
+    #[test]
+    fn falls_back_to_mapped_metadata_category() {
+        let meta = meta_with(Some("AudioVideo"), Some("AudioVideo;Player;"));
+        let resolved = resolve_categories(None, Some(&meta));
+        assert_eq!(resolved.as_deref(), Some("AudioVideo;"));
+    }
+
+    #[test]
+    fn falls_back_to_raw_metadata_category() {
+        let meta = meta_with(None, Some("Graphics;"));
+        let resolved = resolve_categories(None, Some(&meta));
+        assert_eq!(resolved.as_deref(), Some("Graphics;"));
+    }
+
+    #[test]
+    fn blank_user_selection_falls_through_to_utility() {
+        let resolved = resolve_categories(Some("   ".into()), None);
+        assert_eq!(resolved.as_deref(), Some("Utility;"));
+    }
+
+    #[test]
+    fn trailing_semicolon_is_not_duplicated() {
+        assert_eq!(ensure_trailing_semicolon("Game;"), "Game;");
+        assert_eq!(ensure_trailing_semicolon(" Game "), "Game;");
+    }
+
+    #[test]
+    fn clean_managed_path_rewrites_upstream_names() {
+        let path = PathBuf::from("/apps/example-1234/Obsidian-1.8.7-x86_64.AppImage");
+        assert_eq!(
+            clean_managed_path(&path, "Obsidian"),
+            Some(PathBuf::from("/apps/example-1234/obsidian.appimage"))
+        );
+    }
+
+    #[test]
+    fn clean_managed_path_is_noop_when_already_clean() {
+        let path = PathBuf::from("/apps/example-1234/obsidian.appimage");
+        assert_eq!(clean_managed_path(&path, "Obsidian"), None);
     }
 }

@@ -1,5 +1,6 @@
 mod app;
 mod appimage;
+mod appmeta;
 mod config;
 mod desktop_entry;
 mod downloader;

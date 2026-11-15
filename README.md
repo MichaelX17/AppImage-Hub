@@ -7,6 +7,8 @@ A desktop GUI for downloading, managing, updating, and launching AppImages on Li
 - **Add AppImages**: Import local `.AppImage` files, link to GitHub repos for updates, or download directly from a GitHub repo's latest release
 - **Auto-detect latest releases**: When linked to GitHub, checks for updates against the latest release and can download/update in-place
 - **Organized storage**: Apps are copied/moved into a managed directory (`~/.local/share/appimage-manager/apps/` or a custom folder)
+- **Clean filenames**: Each AppImage is stored under the name you type — `example.appimage`, not the upstream `example_v2.4_x86_64.AppImage`
+- **Portable metadata**: Every app folder keeps a `<name>.json` sidecar (name, category, launch args, icon, repo, version) that is read back when re-importing that AppImage
 - **Desktop integration**: Creates `.desktop` entries in `~/.local/share/applications/` (start menu) and optionally on the Desktop; refreshes menu caches where available
 - **Update management**: "Check All Updates", per-app update actions, and "Update All" with progress tracking and retry on failure
 - **Launch**: Launch AppImages directly from the UI with optional custom launch arguments
@@ -20,6 +22,7 @@ A desktop GUI for downloading, managing, updating, and launching AppImages on Li
 | `src/main.rs` | eframe entry point, sets up native options/persistence |
 | `src/app.rs` | Core state (`ManagerApp`), UI actions, backend command/event handling |
 | `src/config.rs` | Config persistence (`~/.config/appimage-manager/config.toml`) for apps and custom download dir |
+| `src/appmeta.rs` | Per-AppImage JSON sidecar (`<name>.json` beside `<name>.appimage`): write/read helpers, schema defaults |
 | `src/github.rs` | GitHub API via `octocrab`, repo normalization, latest release + asset selection (prefers AppImage for current arch) |
 | `src/downloader.rs` | Async download with progress, temp-file + atomic replace logic |
 | `src/permissions.rs` | Make files executable on Unix |
@@ -64,7 +67,8 @@ cargo build --release
 ## Data locations
 
 - **Config**: `$XDG_CONFIG_HOME/appimage-manager/config.toml` (defaults to `~/.config/appimage-manager/config.toml`)
-- **Managed apps**: `$XDG_DATA_HOME/appimage-manager/apps/` (defaults to `~/.local/share/appimage-manager/apps/`) unless a custom folder is chosen via `Browse`
+- **Managed apps**: `$XDG_DATA_HOME/appimage-manager/apps/<app-name>-<id8>/` (defaults to `~/.local/share/appimage-manager/apps/`) unless a custom folder is chosen via `Browse`. The binary inside is named after the display name: `<app-name>.appimage`
+- **App metadata**: `<app-name>.json` in the same folder as the AppImage — name, category, launch args, icon, repo, version. It is written on add/edit/update and read back when you re-import that AppImage
 - **Window state**: persisted by eframe via `~/.config/appimage-manager/window_state.json` (as configured)
 - **Desktop entries**: `$XDG_DESKTOP_DIR` and `~/.local/share/applications/`
 

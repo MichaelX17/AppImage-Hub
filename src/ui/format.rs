@@ -45,6 +45,21 @@ pub fn format_progress(downloaded: u64, total: Option<u64>) -> String {
     format!("{:.1} / {} MB", downloaded_mb, total_mb)
 }
 
+/// Format how long ago `then` was, for the footer's "Last checked" label.
+pub fn format_relative_time(then: Instant) -> String {
+    let secs = then.elapsed().as_secs();
+    match secs {
+        0..=9 => "just now".to_string(),
+        10..=59 => format!("{secs} seconds ago"),
+        60..=119 => "1 minute ago".to_string(),
+        120..=3599 => format!("{} minutes ago", secs / 60),
+        3600..=7199 => "1 hour ago".to_string(),
+        7200..=86_399 => format!("{} hours ago", secs / 3600),
+        86_400..=172_799 => "1 day ago".to_string(),
+        _ => format!("{} days ago", secs / 86_400),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,5 +96,31 @@ mod tests {
             "1.5 / 10.0 MB"
         );
         assert_eq!(format_progress(1_048_576, None), "1.0 / ? MB");
+    }
+
+    #[test]
+    fn relative_time_matches_known_values() {
+        let now = Instant::now();
+        assert_eq!(format_relative_time(now), "just now");
+        assert_eq!(
+            format_relative_time(now - Duration::from_secs(30)),
+            "30 seconds ago"
+        );
+        assert_eq!(
+            format_relative_time(now - Duration::from_secs(90)),
+            "1 minute ago"
+        );
+        assert_eq!(
+            format_relative_time(now - Duration::from_secs(120)),
+            "2 minutes ago"
+        );
+        assert_eq!(
+            format_relative_time(now - Duration::from_secs(7200)),
+            "2 hours ago"
+        );
+        assert_eq!(
+            format_relative_time(now - Duration::from_secs(86_400 * 3)),
+            "3 days ago"
+        );
     }
 }
