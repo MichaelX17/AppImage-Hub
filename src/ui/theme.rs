@@ -148,14 +148,14 @@ pub fn field_label(text: impl Into<String>) -> RichText {
 /// A small inline badge indicating an update is available.
 /// Uses both color and text so it is not color-alone.
 pub fn update_available_label(tag: &str) -> RichText {
-    RichText::new(format!("↑ {} — Update available", tag))
+    RichText::new(format!("• {} - Update available", tag))
         .strong()
         .color(ACCENT_HOVER)
 }
 
 /// Label for the "up to date" version status.
 pub fn up_to_date_label(tag: &str) -> RichText {
-    RichText::new(format!("✓ {} — Up to date", tag)).color(SUCCESS)
+    RichText::new(format!("{} - Up to date", tag)).color(SUCCESS)
 }
 
 /// A compact button styled for a primary update action when an update is available.

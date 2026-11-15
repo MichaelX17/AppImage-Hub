@@ -24,6 +24,13 @@ pub const KDE_CATEGORIES: &[(&str, &str)] = &[
     ("System", "System"),
 ];
 
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetSelectionMode {
+    #[default]
+    Smart,
+    Manual,
+}
+
 #[derive(Clone)]
 pub struct SidePanelFormState {
     pub editing_app_id: Option<String>,
@@ -38,6 +45,11 @@ pub struct SidePanelFormState {
     pub icon_path: String,
     pub github_url: String,
     pub launch_args: String,
+    pub asset_selection_mode: AssetSelectionMode,
+    pub manual_asset: Option<String>,
+    pub available_assets: Vec<crate::github::GithubAssetInfo>,
+    pub is_fetching_assets: bool,
+    pub fetch_assets_error: Option<String>,
 }
 
 impl Default for SidePanelFormState {
@@ -55,6 +67,11 @@ impl Default for SidePanelFormState {
             icon_path: String::new(),
             github_url: String::new(),
             launch_args: String::new(),
+            asset_selection_mode: AssetSelectionMode::default(),
+            manual_asset: None,
+            available_assets: Vec::new(),
+            is_fetching_assets: false,
+            fetch_assets_error: None,
         }
     }
 }
@@ -437,11 +454,7 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: Size
                     .pick_file()
                 {
                     mgr.side_panel_form.local_path = p.display().to_string();
-                    if mgr.side_panel_form.display_name.trim().is_empty() {
-                        if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                            mgr.side_panel_form.display_name = stem.to_string();
-                        }
-                    }
+                    mgr.auto_populate_from_appimage(&p);
                 }
             }
         });
@@ -461,13 +474,26 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: Size
     // ── Metadata section ─────────────────────────────────────────────────
     ui.label(theme::section_heading("Metadata"));
     ui.add_space(theme::SPACE_XS);
-    ui.label(theme::field_label("Icon Path (optional)"));
+    ui.label(theme::field_label("Icon (optional)"));
     ui.horizontal(|ui| {
+        let current_icon = mgr.side_panel_form.icon_path.trim();
+        if !current_icon.is_empty() {
+            let icon_p = std::path::Path::new(current_icon);
+            if icon_p.exists() {
+                let uri = format!("file://{}", icon_p.display());
+                ui.add(
+                    egui::Image::new(uri)
+                        .fit_to_exact_size(egui::vec2(28.0, 28.0))
+                        .corner_radius(egui::CornerRadius::same(theme::RADIUS_SM)),
+                );
+            }
+        }
+
         let browse_w = 92.0;
         let w = ui.available_width().max(120.0);
         ui.add(
             egui::TextEdit::singleline(&mut mgr.side_panel_form.icon_path)
-                .hint_text("Optional icon file")
+                .hint_text("Extracted from AppImage automatically")
                 .desired_width((w - browse_w - theme::SPACE_SM).max(80.0)),
         );
         if ui.add(theme::secondary_button("Browse")).clicked() {
@@ -479,6 +505,10 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: Size
             }
         }
     });
+    ui.label(
+        theme::muted_label("Embedded AppImage icon is extracted automatically if left empty.")
+            .small(),
+    );
     ui.add_space(theme::SPACE_MD);
 
     // ── Repository section (shown when relevant) ─────────────────────────
@@ -490,6 +520,94 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: Size
                 .desired_width(avail_w.max(80.0)),
         );
         ui.label(theme::muted_label("Required for update checks and GitHub installs.").small());
+        ui.add_space(theme::SPACE_SM);
+
+        ui.label(theme::field_label("Asset Selection Mode"));
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut mgr.side_panel_form.asset_selection_mode,
+                AssetSelectionMode::Smart,
+                "⚡ Smart (Auto)",
+            );
+            ui.selectable_value(
+                &mut mgr.side_panel_form.asset_selection_mode,
+                AssetSelectionMode::Manual,
+                "✍ Manual",
+            );
+        });
+
+        match mgr.side_panel_form.asset_selection_mode {
+            AssetSelectionMode::Smart => {
+                ui.label(
+                    theme::muted_label(
+                        "Auto-detects the optimal AppImage for your CPU architecture (x86_64/amd64) and excludes hashes/zsync.",
+                    )
+                    .small(),
+                );
+            }
+            AssetSelectionMode::Manual => {
+                ui.horizontal(|ui| {
+                    let fetch_btn = ui.add(theme::secondary_button("Fetch Assets"));
+                    if fetch_btn.clicked() {
+                        let repo = mgr.side_panel_form.github_url.trim().to_string();
+                        if !repo.is_empty() {
+                            mgr.side_panel_form.is_fetching_assets = true;
+                            mgr.side_panel_form.fetch_assets_error = None;
+                            mgr.send_cmd(crate::app::BackendCommand::FetchRepoAssets { repo });
+                        }
+                    }
+                    if mgr.side_panel_form.is_fetching_assets {
+                        ui.spinner();
+                        ui.label(theme::muted_label("Fetching assets...").small());
+                    }
+                });
+
+                if let Some(ref err) = mgr.side_panel_form.fetch_assets_error {
+                    ui.label(
+                        RichText::new(format!("⚠ {}", err))
+                            .color(theme::DANGER)
+                            .small(),
+                    );
+                }
+
+                if !mgr.side_panel_form.available_assets.is_empty() {
+                    let selected_text = mgr
+                        .side_panel_form
+                        .manual_asset
+                        .as_deref()
+                        .unwrap_or("Select an AppImage asset…");
+                    egui::ComboBox::from_id_salt("manual_asset_combo")
+                        .selected_text(selected_text)
+                        .width(avail_w.max(80.0))
+                        .show_ui(ui, |ui| {
+                            for asset in &mgr.side_panel_form.available_assets {
+                                let mb = asset.size as f64 / (1024.0 * 1024.0);
+                                let label = format!("{} ({:.1} MB)", asset.name, mb);
+                                let is_selected = mgr.side_panel_form.manual_asset.as_deref()
+                                    == Some(&asset.name);
+                                if ui.selectable_label(is_selected, label).clicked() {
+                                    mgr.side_panel_form.manual_asset = Some(asset.name.clone());
+                                }
+                            }
+                        });
+                } else if !mgr.side_panel_form.is_fetching_assets
+                    && mgr.side_panel_form.fetch_assets_error.is_none()
+                {
+                    if let Some(ref current) = mgr.side_panel_form.manual_asset {
+                        ui.label(
+                            theme::muted_label(format!("Tracking asset: {}", current)).small(),
+                        );
+                    } else {
+                        ui.label(
+                            theme::muted_label(
+                                "Click 'Fetch Assets' to choose from available .AppImages.",
+                            )
+                            .small(),
+                        );
+                    }
+                }
+            }
+        }
         ui.add_space(theme::SPACE_MD);
     }
     // For LocalOnly we hide the GitHub URL field entirely to reduce noise.
@@ -531,6 +649,10 @@ fn validation_message(form: &SidePanelFormState) -> Option<&'static str> {
         SidePanelMode::GithubOnly => {
             if form.github_url.trim().is_empty() {
                 Some("GitHub URL is required for GitHub Only.")
+            } else if form.asset_selection_mode == AssetSelectionMode::Manual
+                && form.manual_asset.is_none()
+            {
+                Some("Select an AppImage asset, or switch to Smart mode.")
             } else {
                 None
             }

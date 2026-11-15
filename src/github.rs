@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use octocrab::Octocrab;
 use std::sync::Once;
 
@@ -41,7 +41,144 @@ fn normalize_repo(repo: &str) -> Result<(String, String)> {
     Ok((owner.to_string(), name.to_string()))
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct GithubAssetInfo {
+    pub name: String,
+    pub size: u64,
+    pub download_url: String,
+}
+
+/// Determines if an asset filename is a genuine AppImage executable binary,
+/// excluding checksums, signatures, blockmaps, and update metadata files.
+pub fn is_valid_appimage_asset(name: &str) -> bool {
+    let lower = name.to_lowercase();
+
+    // Must end with .appimage
+    if !lower.ends_with(".appimage") {
+        return false;
+    }
+
+    // Must not be a hash, checksum, or signature file
+    let invalid_suffixes = [
+        ".zsync",
+        ".sha256",
+        ".sha512",
+        ".sha1",
+        ".md5",
+        ".asc",
+        ".sig",
+        ".signature",
+        ".torrent",
+        ".txt",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".blockmap",
+    ];
+    for suffix in &invalid_suffixes {
+        if lower.ends_with(suffix) {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Scores an AppImage asset filename based on how well it matches the target system architecture
+/// and penalizes unwanted artifacts (e.g. debug builds, source tarballs).
+pub fn score_asset(name: &str, target_arch: &str) -> i32 {
+    let lower = name.to_lowercase();
+    let mut score = 100;
+
+    // Check architecture matching
+    match target_arch {
+        "x86_64" => {
+            if lower.contains("x86_64") || lower.contains("amd64") || lower.contains("x64") {
+                score += 60;
+            } else if lower.contains("aarch64")
+                || lower.contains("arm64")
+                || lower.contains("armhf")
+                || lower.contains("armv7")
+                || lower.contains("i686")
+                || lower.contains("i386")
+            {
+                score -= 100;
+            }
+        }
+        "aarch64" => {
+            if lower.contains("aarch64") || lower.contains("arm64") {
+                score += 60;
+            } else if lower.contains("x86_64")
+                || lower.contains("amd64")
+                || lower.contains("x64")
+                || lower.contains("i686")
+                || lower.contains("i386")
+            {
+                score -= 100;
+            }
+        }
+        _ => {
+            if lower.contains(target_arch) {
+                score += 60;
+            }
+        }
+    }
+
+    // Penalties for debug or development artifacts
+    if lower.contains("debug") || lower.contains("dbg") || lower.contains("symbols") {
+        score -= 50;
+    }
+    if lower.contains("untested") || lower.contains("sources") || lower.contains("devel") {
+        score -= 30;
+    }
+
+    // Slight preference for standard release/stable names
+    if lower.contains("stable") || lower.contains("release") {
+        score += 10;
+    }
+
+    score
+}
+
+pub async fn fetch_available_appimages(
+    client: &Octocrab,
+    repo: &str,
+) -> Result<Vec<GithubAssetInfo>> {
+    let (owner, name) = normalize_repo(repo)?;
+    let release = client
+        .repos(&owner, &name)
+        .releases()
+        .get_latest()
+        .await
+        .with_context(|| format!("failed to fetch latest release for {owner}/{name}"))?;
+
+    let arch = std::env::consts::ARCH;
+    let mut assets: Vec<GithubAssetInfo> = release
+        .assets
+        .into_iter()
+        .filter(|a| is_valid_appimage_asset(&a.name))
+        .map(|a| GithubAssetInfo {
+            name: a.name,
+            size: a.size as u64,
+            download_url: a.browser_download_url.to_string(),
+        })
+        .collect();
+
+    // Sort by smart score descending, so best match is first in the list
+    assets.sort_by_key(|a| std::cmp::Reverse(score_asset(&a.name, arch)));
+    Ok(assets)
+}
+
+#[allow(dead_code)]
 pub async fn fetch_latest_release(client: &Octocrab, repo: &str) -> Result<ReleaseInfo> {
+    fetch_latest_release_with_selector(client, repo, None).await
+}
+
+pub async fn fetch_latest_release_with_selector(
+    client: &Octocrab,
+    repo: &str,
+    manual_asset: Option<&str>,
+) -> Result<ReleaseInfo> {
     let (owner, name) = normalize_repo(repo)?;
 
     let release = client
@@ -52,17 +189,53 @@ pub async fn fetch_latest_release(client: &Octocrab, repo: &str) -> Result<Relea
         .with_context(|| format!("failed to fetch latest release for {owner}/{name}"))?;
 
     let arch = std::env::consts::ARCH;
-    let asset = release
+
+    let valid_assets: Vec<_> = release
         .assets
         .iter()
-        .find(|a| a.name.to_lowercase().contains("appimage") && a.name.contains(arch))
-        .or_else(|| {
-            release
-                .assets
-                .iter()
-                .find(|a| a.name.to_lowercase().contains("appimage"))
-        })
-        .ok_or_else(|| anyhow!("no AppImage asset found in release {}", release.tag_name))?;
+        .filter(|a| is_valid_appimage_asset(&a.name))
+        .collect();
+
+    if valid_assets.is_empty() {
+        anyhow::bail!(
+            "no valid AppImage asset found in release {}",
+            release.tag_name
+        );
+    }
+
+    let asset = if let Some(pref) = manual_asset {
+        let pref_trimmed = pref.trim();
+        // 1. Exact match
+        valid_assets
+            .iter()
+            .find(|a| a.name == pref_trimmed)
+            // 2. Case-insensitive exact match
+            .or_else(|| {
+                valid_assets
+                    .iter()
+                    .find(|a| a.name.eq_ignore_ascii_case(pref_trimmed))
+            })
+            // 3. Substring / pattern match
+            .or_else(|| {
+                let pref_lower = pref_trimmed.to_lowercase();
+                valid_assets
+                    .iter()
+                    .find(|a| a.name.to_lowercase().contains(&pref_lower))
+            })
+            // Fallback to highest scored asset
+            .unwrap_or_else(|| {
+                valid_assets
+                    .iter()
+                    .max_by_key(|a| score_asset(&a.name, arch))
+                    .unwrap()
+            })
+    } else {
+        // Smart mode: pick highest score
+        valid_assets
+            .iter()
+            .max_by_key(|a| score_asset(&a.name, arch))
+            .unwrap()
+    };
 
     Ok(ReleaseInfo {
         tag: release.tag_name.clone(),
@@ -104,6 +277,49 @@ mod tests {
             assert_eq!(got, (o.to_string(), n.to_string()), "input={input}");
         }
         Ok(())
+    }
+
+    #[test]
+    fn test_is_valid_appimage_asset() {
+        assert!(is_valid_appimage_asset("MyApp-1.0.0-x86_64.AppImage"));
+        assert!(is_valid_appimage_asset("myapp.appimage"));
+        assert!(is_valid_appimage_asset("Krita-5.2.2-x86_64-qt6.AppImage"));
+
+        // Hashes, signatures, and zsync must be rejected
+        assert!(!is_valid_appimage_asset(
+            "MyApp-1.0.0-x86_64.AppImage.zsync"
+        ));
+        assert!(!is_valid_appimage_asset(
+            "MyApp-1.0.0-x86_64.AppImage.sha256"
+        ));
+        assert!(!is_valid_appimage_asset("MyApp-1.0.0-x86_64.AppImage.asc"));
+        assert!(!is_valid_appimage_asset("MyApp-1.0.0-x86_64.AppImage.sig"));
+        assert!(!is_valid_appimage_asset(
+            "MyApp-1.0.0-x86_64.AppImage.blockmap"
+        ));
+        assert!(!is_valid_appimage_asset("MyApp-1.0.0.tar.gz"));
+        assert!(!is_valid_appimage_asset("MyApp.deb"));
+    }
+
+    #[test]
+    fn test_score_asset_architectures() {
+        // On x86_64: x86_64 and amd64 score highest
+        let x86_score = score_asset("MyApp-x86_64.AppImage", "x86_64");
+        let amd64_score = score_asset("MyApp-amd64.AppImage", "x86_64");
+        let aarch64_score = score_asset("MyApp-aarch64.AppImage", "x86_64");
+        let debug_score = score_asset("MyApp-x86_64-debug.AppImage", "x86_64");
+
+        assert!(x86_score > aarch64_score);
+        assert!(amd64_score > aarch64_score);
+        assert!(x86_score > debug_score);
+
+        // On aarch64: aarch64 and arm64 score highest
+        let arm_score = score_asset("MyApp-aarch64.AppImage", "aarch64");
+        let arm64_score = score_asset("MyApp-arm64.AppImage", "aarch64");
+        let intel_score = score_asset("MyApp-x86_64.AppImage", "aarch64");
+
+        assert!(arm_score > intel_score);
+        assert!(arm64_score > intel_score);
     }
 
     #[tokio::test]

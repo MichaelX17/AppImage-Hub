@@ -29,6 +29,8 @@ pub struct AppEntry {
     pub categories: Option<String>,
     #[serde(default = "default_startup_notify")]
     pub startup_notify: bool,
+    #[serde(default)]
+    pub asset_preference: Option<String>,
 }
 
 fn default_startup_notify() -> bool {

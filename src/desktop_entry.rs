@@ -89,11 +89,29 @@ pub fn desktop_file_content(app: &AppEntry) -> String {
         categories,
     ));
 
-    if let Some(icon) = &app.icon_path {
-        let icon = icon.to_string_lossy();
-        if !icon.trim().is_empty() {
-            content.push_str(&format!("Icon={}\n", icon));
+    let icon_to_use = if let Some(icon) = &app.icon_path {
+        let s = icon.to_string_lossy();
+        if !s.trim().is_empty() {
+            Some(s.to_string())
+        } else {
+            None
         }
+    } else if let Some(folder) = app.local_path.parent() {
+        let p_png = folder.join("icon.png");
+        let p_svg = folder.join("icon.svg");
+        if p_png.exists() {
+            Some(p_png.to_string_lossy().to_string())
+        } else if p_svg.exists() {
+            Some(p_svg.to_string_lossy().to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(icon) = icon_to_use {
+        content.push_str(&format!("Icon={}\n", icon));
     }
     content
 }
@@ -143,6 +161,74 @@ fn refresh_menu_cache(applications_dir: &Path) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+}
+
+/// Automatically registers AppImage Hub's own .desktop entry and icon in
+/// `~/.local/share/applications` and `~/.local/share/icons/hicolor`.
+///
+/// On Wayland (KDE Plasma / KWin), client windows cannot push raw icon pixels
+/// for window titlebar decorations. KWin matches the window's `app_id` to an
+/// installed `.desktop` file and reads its `Icon=` property. If no matching
+/// `.desktop` file is found, KWin falls back to the generic Wayland logo.
+pub fn ensure_hub_desktop_entry() {
+    let Ok(apps_dir) = xdg::applications_dir() else {
+        return;
+    };
+    let data_dir = dirs::data_dir().unwrap_or_else(|| {
+        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share")
+    });
+
+    // 1. Install icon to ~/.local/share/icons/hicolor/512x512/apps/appimage-hub.png
+    let icon_dir = data_dir.join("icons/hicolor/512x512/apps");
+    let icon_path = icon_dir.join("appimage-hub.png");
+    let logo_bytes = include_bytes!("../assets/logo.png");
+
+    let need_write_icon = match std::fs::read(&icon_path) {
+        Ok(existing) => existing != logo_bytes,
+        Err(_) => true,
+    };
+    if need_write_icon {
+        let _ = std::fs::create_dir_all(&icon_dir);
+        let _ = std::fs::write(&icon_path, logo_bytes);
+    }
+
+    // 2. Install desktop entry to ~/.local/share/applications/appimage-hub.desktop
+    let desktop_path = apps_dir.join("appimage-hub.desktop");
+    let current_exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "appimage-manager".into());
+
+    let desktop_content = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=AppImage Hub\n\
+         GenericName=AppImage Manager\n\
+         Comment=Manage, launch, and update AppImages\n\
+         Exec=\"{}\"\n\
+         Icon=appimage-hub\n\
+         Terminal=false\n\
+         StartupNotify=true\n\
+         StartupWMClass=appimage-hub\n\
+         Categories=Utility;\n",
+        current_exe
+    );
+
+    let need_write_desktop = match std::fs::read_to_string(&desktop_path) {
+        Ok(existing) => existing != desktop_content,
+        Err(_) => true,
+    };
+    if need_write_desktop {
+        let _ = std::fs::create_dir_all(&apps_dir);
+        let _ = std::fs::write(&desktop_path, &desktop_content);
+        let _ = set_entry_permissions(&desktop_path);
+
+        // Also write appimage-manager.desktop alias in case compositor matches process name
+        let alt_desktop = apps_dir.join("appimage-manager.desktop");
+        let _ = std::fs::write(&alt_desktop, &desktop_content);
+        let _ = set_entry_permissions(&alt_desktop);
+
+        refresh_menu_cache(&apps_dir);
+    }
 }
 
 pub fn write_menu_entry(app: &AppEntry, applications_dir: &Path) -> Result<()> {
@@ -253,6 +339,7 @@ mod tests {
             comment: None,
             categories: None,
             startup_notify: true,
+            asset_preference: None,
         }
     }
 

@@ -677,15 +677,32 @@ fn render_icon(ui: &mut egui::Ui, app: &AppEntry, size: f32) {
         egui::StrokeKind::Inside,
     );
 
-    if let Some(path) = &app.icon_path {
-        if path.exists() {
-            let uri = format!("file://{}", path.display());
-            let image = egui::Image::new(uri).corner_radius(rounding);
-            let inner = rect.shrink(6.0);
-            if inner.is_finite() && inner.width() > 1.0 && inner.height() > 1.0 {
-                ui.put(inner, image);
-                return;
-            }
+    let icon_file = app
+        .icon_path
+        .as_ref()
+        .filter(|p| p.exists())
+        .cloned()
+        .or_else(|| {
+            app.local_path.parent().and_then(|folder| {
+                let p1 = folder.join("icon.png");
+                if p1.exists() {
+                    return Some(p1);
+                }
+                let p2 = folder.join("icon.svg");
+                if p2.exists() {
+                    return Some(p2);
+                }
+                None
+            })
+        });
+
+    if let Some(path) = &icon_file {
+        let uri = format!("file://{}", path.display());
+        let image = egui::Image::new(uri).corner_radius(rounding);
+        let inner = rect.shrink(6.0);
+        if inner.is_finite() && inner.width() > 1.0 && inner.height() > 1.0 {
+            ui.put(inner, image);
+            return;
         }
     }
 

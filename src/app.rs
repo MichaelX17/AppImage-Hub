@@ -8,7 +8,7 @@ use crate::ui::breakpoints::SizeClass;
 use crate::xdg;
 use eframe::egui::{self, RichText};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -32,7 +32,11 @@ pub enum BackendCommand {
         op_id: String,
         github_repo: String,
         display_name: String,
+        asset_name: Option<String>,
         cancel: Arc<AtomicBool>,
+    },
+    FetchRepoAssets {
+        repo: String,
     },
     Launch {
         app_id: String,
@@ -42,6 +46,14 @@ pub enum BackendCommand {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum BackendEvent {
+    RepoAssetsFetched {
+        repo: String,
+        assets: Vec<crate::github::GithubAssetInfo>,
+    },
+    RepoAssetsFailed {
+        repo: String,
+        error: String,
+    },
     UpdateAvailable {
         app_id: String,
         tag: String,
@@ -112,6 +124,7 @@ pub enum RetryAction {
     InstallFromRepo {
         github_repo: String,
         display_name: String,
+        asset_name: Option<String>,
     },
     DownloadAndReplace {
         app_id: String,
@@ -172,6 +185,7 @@ impl ManagerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         github::ensure_crypto_provider();
         setup_custom_style(&cc.egui_ctx);
+        desktop_entry::ensure_hub_desktop_entry();
 
         let config = Arc::new(Mutex::new(Config::load().unwrap_or_else(|e| {
             eprintln!("failed to load config: {e:#}");
@@ -196,7 +210,7 @@ impl ManagerApp {
         let (evt_tx, evt_rx) = mpsc::channel::<BackendEvent>(256);
         spawn_backend(config.clone(), cmd_rx, evt_tx);
 
-        Self {
+        let mut app = Self {
             config,
             cmd_tx,
             evt_rx,
@@ -212,7 +226,9 @@ impl ManagerApp {
             side_panel_width,
             show_side_panel,
             compact_mode,
-        }
+        };
+        app.repair_missing_icons();
+        app
     }
 
     pub(crate) fn send_cmd(&mut self, cmd: BackendCommand) {
@@ -248,6 +264,23 @@ impl ManagerApp {
 
     fn apply_event(&mut self, evt: BackendEvent) {
         match evt {
+            BackendEvent::RepoAssetsFetched { repo, assets } => {
+                let current_url = self.side_panel_form.github_url.trim();
+                if current_url.contains(&repo) || repo.contains(current_url) {
+                    self.side_panel_form.is_fetching_assets = false;
+                    self.side_panel_form.fetch_assets_error = None;
+                    if self.side_panel_form.manual_asset.is_none() {
+                        if let Some(first) = assets.first() {
+                            self.side_panel_form.manual_asset = Some(first.name.clone());
+                        }
+                    }
+                    self.side_panel_form.available_assets = assets;
+                }
+            }
+            BackendEvent::RepoAssetsFailed { error, .. } => {
+                self.side_panel_form.is_fetching_assets = false;
+                self.side_panel_form.fetch_assets_error = Some(error);
+            }
             BackendEvent::UpdateAvailable {
                 app_id,
                 tag,
@@ -358,7 +391,12 @@ impl ManagerApp {
         }
     }
 
-    pub(crate) fn start_install_from_repo(&mut self, github_repo: String, display_name: String) {
+    pub(crate) fn start_install_from_repo(
+        &mut self,
+        github_repo: String,
+        display_name: String,
+        asset_name: Option<String>,
+    ) {
         let op_id = Uuid::new_v4().to_string();
         let cancel = Arc::new(AtomicBool::new(false));
         let label = if display_name.trim().is_empty() {
@@ -383,6 +421,7 @@ impl ManagerApp {
                 retry: Some(RetryAction::InstallFromRepo {
                     github_repo: github_repo.clone(),
                     display_name: display_name.clone(),
+                    asset_name: asset_name.clone(),
                 }),
             },
         );
@@ -390,6 +429,7 @@ impl ManagerApp {
             op_id,
             github_repo,
             display_name,
+            asset_name,
             cancel,
         });
     }
@@ -508,6 +548,11 @@ impl ManagerApp {
         };
 
         self.add_to = None;
+        let asset_selection_mode = if entry.asset_preference.is_some() {
+            crate::ui::side_panel::AssetSelectionMode::Manual
+        } else {
+            crate::ui::side_panel::AssetSelectionMode::Smart
+        };
         self.side_panel_form = crate::ui::side_panel::SidePanelFormState {
             editing_app_id: Some(entry.id.clone()),
             display_name: entry.display_name.clone(),
@@ -525,6 +570,11 @@ impl ManagerApp {
                 .unwrap_or_default(),
             github_url,
             launch_args: entry.args.join(" "),
+            asset_selection_mode,
+            manual_asset: entry.asset_preference.clone(),
+            available_assets: Vec::new(),
+            is_fetching_assets: false,
+            fetch_assets_error: None,
         };
         self.status = None;
         self.is_form_open = true;
@@ -541,7 +591,8 @@ impl ManagerApp {
                 RetryAction::InstallFromRepo {
                     github_repo,
                     display_name,
-                } => self.start_install_from_repo(github_repo, display_name),
+                    asset_name,
+                } => self.start_install_from_repo(github_repo, display_name, asset_name),
                 RetryAction::DownloadAndReplace {
                     app_id,
                     url,
@@ -710,25 +761,11 @@ impl ManagerApp {
         let tight = matches!(size_class, SizeClass::Tight);
 
         ui.horizontal(|ui| {
-            let avail = ui.available_size();
-            if avail.x.is_finite() && avail.y.is_finite() && avail.x >= 28.0 && avail.y >= 28.0 {
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
-                if rect.is_finite() && rect.width() > 0.0 && rect.height() > 0.0 {
-                    let r = rect.shrink(3.0);
-                    ui.painter().rect_filled(
-                        r,
-                        egui::CornerRadius::same(6),
-                        crate::ui::theme::ACCENT,
-                    );
-                    ui.painter().rect_stroke(
-                        r.shrink(5.0),
-                        egui::CornerRadius::same(3),
-                        egui::Stroke::new(2.0_f32, eframe::egui::Color32::WHITE),
-                        egui::StrokeKind::Inside,
-                    );
-                }
-            }
+            ui.add(
+                egui::Image::new(egui::include_image!("../assets/logo.png"))
+                    .fit_to_exact_size(egui::vec2(28.0, 28.0))
+                    .corner_radius(egui::CornerRadius::same(6)),
+            );
             ui.add_space(6.0);
             if tight {
                 ui.label(RichText::new("AIM").size(22.0).strong())
@@ -900,6 +937,94 @@ impl ManagerApp {
         }
     }
 
+    pub(crate) fn auto_populate_from_appimage(&mut self, appimage_path: &Path) {
+        if let Ok(meta) = crate::appimage::extract_metadata(appimage_path, None) {
+            let stem = appimage_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+
+            if self.side_panel_form.display_name.trim().is_empty()
+                || self.side_panel_form.display_name.trim() == stem
+            {
+                if let Some(name) = meta.name {
+                    self.side_panel_form.display_name = name;
+                } else if !stem.is_empty() {
+                    self.side_panel_form.display_name = stem.to_string();
+                }
+            }
+
+            if self.side_panel_form.generic_name.trim().is_empty() {
+                if let Some(generic) = meta.generic_name {
+                    self.side_panel_form.generic_name = generic;
+                }
+            }
+
+            if self.side_panel_form.comment.trim().is_empty() {
+                if let Some(comment) = meta.comment {
+                    self.side_panel_form.comment = comment;
+                }
+            }
+
+            if let Some(cat) = meta.matched_category {
+                if meta.is_custom_category {
+                    self.side_panel_form.category = "Custom".to_string();
+                    self.side_panel_form.custom_category = cat;
+                } else {
+                    self.side_panel_form.category = cat;
+                }
+            }
+
+            if let Some(notify) = meta.startup_notify {
+                self.side_panel_form.startup_notify = notify;
+            }
+
+            if let Some(icon_p) = meta.icon_path {
+                self.side_panel_form.icon_path = icon_p.display().to_string();
+            }
+        }
+    }
+
+    pub(crate) fn repair_missing_icons(&mut self) {
+        let mut modified = false;
+        let mut apps_to_rewrite: Vec<AppEntry> = Vec::new();
+
+        if let Ok(mut cfg) = self.config.lock() {
+            for app in &mut cfg.applications {
+                let has_valid_icon = app.icon_path.as_ref().map(|p| p.exists()).unwrap_or(false);
+
+                if !has_valid_icon && app.local_path.exists() {
+                    if let Some(folder) = app.local_path.parent() {
+                        let direct_png = folder.join("icon.png");
+                        let direct_svg = folder.join("icon.svg");
+                        if direct_png.exists() {
+                            app.icon_path = Some(direct_png);
+                            modified = true;
+                            apps_to_rewrite.push(app.clone());
+                        } else if direct_svg.exists() {
+                            app.icon_path = Some(direct_svg);
+                            modified = true;
+                            apps_to_rewrite.push(app.clone());
+                        } else if let Ok(extracted) =
+                            crate::appimage::extract_icon(&app.local_path, folder)
+                        {
+                            app.icon_path = Some(extracted);
+                            modified = true;
+                            apps_to_rewrite.push(app.clone());
+                        }
+                    }
+                }
+            }
+            if modified {
+                let _ = cfg.save();
+            }
+        }
+
+        for app in apps_to_rewrite {
+            let _ = write_desktop(&app);
+        }
+    }
+
     pub(crate) fn updates_available_count(&self) -> usize {
         self.update_available.len()
     }
@@ -950,6 +1075,12 @@ impl ManagerApp {
             }
         };
         let startup_notify = form.startup_notify;
+        let asset_preference =
+            if form.asset_selection_mode == crate::ui::side_panel::AssetSelectionMode::Manual {
+                form.manual_asset.clone()
+            } else {
+                None
+            };
 
         if let Some(app_id) = form.editing_app_id.clone() {
             let mut old_entry: Option<AppEntry> = None;
@@ -963,7 +1094,12 @@ impl ManagerApp {
                     e.categories = categories;
                     e.startup_notify = startup_notify;
                     e.args = args;
-                    e.icon_path = icon_path;
+                    e.asset_preference = asset_preference;
+                    if let Some(folder) = e.local_path.parent() {
+                        e.icon_path = resolve_final_icon(icon_path, &e.local_path, folder);
+                    } else {
+                        e.icon_path = icon_path;
+                    }
                     match form.mode {
                         SidePanelMode::LocalOnly => {
                             e.source = AppSource::LocalOnly;
@@ -1031,6 +1167,11 @@ impl ManagerApp {
                         return;
                     }
                 };
+                let folder = managed_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new(""));
+                let final_icon_path = resolve_final_icon(icon_path, &managed_path, folder);
+
                 let entry = AppEntry {
                     id,
                     display_name,
@@ -1042,7 +1183,8 @@ impl ManagerApp {
                     local_path: managed_path.clone(),
                     current_version: String::new(),
                     args,
-                    icon_path,
+                    icon_path: final_icon_path,
+                    asset_preference: None,
                 };
                 if let Err(e) = permissions::set_executable(&managed_path) {
                     self.status = Some(format!("chmod failed: {e:#}"));
@@ -1079,6 +1221,11 @@ impl ManagerApp {
                         return;
                     }
                 };
+                let folder = managed_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new(""));
+                let final_icon_path = resolve_final_icon(icon_path, &managed_path, folder);
+
                 let entry = AppEntry {
                     id: id.clone(),
                     display_name,
@@ -1090,7 +1237,8 @@ impl ManagerApp {
                     local_path: managed_path.clone(),
                     current_version: String::new(),
                     args,
-                    icon_path,
+                    icon_path: final_icon_path,
+                    asset_preference,
                 };
                 if let Err(e) = permissions::set_executable(&managed_path) {
                     self.status = Some(format!("chmod failed: {e:#}"));
@@ -1108,7 +1256,11 @@ impl ManagerApp {
                     self.status = Some("Provide GitHub URL".into());
                     return;
                 }
-                self.start_install_from_repo(form.github_url.trim().to_string(), display_name);
+                self.start_install_from_repo(
+                    form.github_url.trim().to_string(),
+                    display_name,
+                    asset_preference,
+                );
             }
         }
 
@@ -1257,6 +1409,40 @@ fn parse_args(s: &str) -> Vec<String> {
     s.split_whitespace().map(|x| x.to_string()).collect()
 }
 
+fn resolve_final_icon(
+    user_icon_path: Option<PathBuf>,
+    managed_appimage: &std::path::Path,
+    target_folder: &std::path::Path,
+) -> Option<PathBuf> {
+    if let Some(user_icon) = user_icon_path {
+        if user_icon.exists() {
+            if user_icon.parent() == Some(target_folder) {
+                return Some(user_icon);
+            }
+            let ext = user_icon
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("png");
+            let dest = target_folder.join(format!("icon.{}", ext));
+            if std::fs::copy(&user_icon, &dest).is_ok() {
+                return Some(dest);
+            }
+            return Some(user_icon);
+        }
+    }
+
+    let p_png = target_folder.join("icon.png");
+    if p_png.exists() {
+        return Some(p_png);
+    }
+    let p_svg = target_folder.join("icon.svg");
+    if p_svg.exists() {
+        return Some(p_svg);
+    }
+
+    crate::appimage::extract_icon(managed_appimage, target_folder).ok()
+}
+
 fn write_desktop(entry: &AppEntry) -> anyhow::Result<()> {
     let desktop = xdg::desktop_dir()?;
     let apps = xdg::applications_dir()?;
@@ -1351,7 +1537,13 @@ fn spawn_backend(
                                     AppSource::LocalOnly => None,
                                 };
                                 if let Some(repo) = repo {
-                                    match github::fetch_latest_release(&octo, &repo).await {
+                                    match github::fetch_latest_release_with_selector(
+                                        &octo,
+                                        &repo,
+                                        entry.asset_preference.as_deref(),
+                                    )
+                                    .await
+                                    {
                                         Ok(info) => {
                                             if !entry.current_version.is_empty()
                                                 && info.tag == entry.current_version
@@ -1471,6 +1663,23 @@ fn spawn_backend(
                                         {
                                             entry.local_path = new_target.clone();
                                             entry.current_version = tag.clone();
+                                            if entry
+                                                .icon_path
+                                                .as_ref()
+                                                .map(|p| !p.exists())
+                                                .unwrap_or(true)
+                                            {
+                                                if let Some(folder) = new_target.parent() {
+                                                    if let Ok(extracted) =
+                                                        crate::appimage::extract_icon(
+                                                            &new_target,
+                                                            folder,
+                                                        )
+                                                    {
+                                                        entry.icon_path = Some(extracted);
+                                                    }
+                                                }
+                                            }
                                             updated_entry = Some(entry.clone());
                                         }
                                         let _ = cfg.save();
@@ -1524,6 +1733,7 @@ fn spawn_backend(
                         op_id,
                         github_repo,
                         display_name,
+                        asset_name,
                         cancel,
                     } => {
                         let label = if display_name.trim().is_empty() {
@@ -1539,7 +1749,13 @@ fn spawn_backend(
                                 kind: OpKind::Install,
                             })
                             .await;
-                        match github::fetch_latest_release(&octo, &github_repo).await {
+                        match github::fetch_latest_release_with_selector(
+                            &octo,
+                            &github_repo,
+                            asset_name.as_deref(),
+                        )
+                        .await
+                        {
                             Ok(info) => {
                                 let install_id = Uuid::new_v4().to_string();
                                 let hint = if display_name.trim().is_empty() {
@@ -1608,23 +1824,43 @@ fn spawn_backend(
                                                         .await;
                                                     continue;
                                                 }
+                                                let (extracted_icon, app_meta) = {
+                                                    let icon = crate::appimage::extract_icon(&target, &folder).ok();
+                                                    let meta = crate::appimage::extract_metadata(&target, None).ok();
+                                                    (icon, meta)
+                                                };
+
                                                 let entry = AppEntry {
                                                     id: install_id.clone(),
                                                     display_name: if display_name.trim().is_empty()
                                                     {
-                                                        github_repo.clone()
+                                                        app_meta
+                                                            .as_ref()
+                                                            .and_then(|m| m.name.clone())
+                                                            .unwrap_or_else(|| github_repo.clone())
                                                     } else {
                                                         display_name
                                                     },
-                                                    generic_name: None,
-                                                    comment: None,
-                                                    categories: Some("Utility;".to_string()),
-                                                    startup_notify: true,
+                                                    generic_name: app_meta
+                                                        .as_ref()
+                                                        .and_then(|m| m.generic_name.clone()),
+                                                    comment: app_meta
+                                                        .as_ref()
+                                                        .and_then(|m| m.comment.clone()),
+                                                    categories: app_meta
+                                                        .as_ref()
+                                                        .and_then(|m| m.categories.clone())
+                                                        .or_else(|| Some("Utility;".to_string())),
+                                                    startup_notify: app_meta
+                                                        .as_ref()
+                                                        .and_then(|m| m.startup_notify)
+                                                        .unwrap_or(true),
                                                     source: AppSource::GithubOnly { github_repo },
                                                     local_path: target,
                                                     current_version: info.tag,
                                                     args: vec![],
-                                                    icon_path: None,
+                                                    icon_path: extracted_icon,
+                                                    asset_preference: asset_name,
                                                 };
                                                 let mut desktop_err: Option<String> = None;
                                                 if let Err(e) = write_desktop(&entry) {
@@ -1691,6 +1927,23 @@ fn spawn_backend(
                                         op_id: Some(op_id),
                                         app_id: None,
                                         message: format!("{e:#}"),
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
+                    BackendCommand::FetchRepoAssets { repo } => {
+                        match github::fetch_available_appimages(&octo, &repo).await {
+                            Ok(assets) => {
+                                let _ = evt_tx
+                                    .send(BackendEvent::RepoAssetsFetched { repo, assets })
+                                    .await;
+                            }
+                            Err(e) => {
+                                let _ = evt_tx
+                                    .send(BackendEvent::RepoAssetsFailed {
+                                        repo,
+                                        error: format!("{e:#}"),
                                     })
                                     .await;
                             }
