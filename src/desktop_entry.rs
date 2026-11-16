@@ -213,20 +213,27 @@ pub fn ensure_hub_desktop_entry() {
         current_exe
     );
 
-    let need_write_desktop = match std::fs::read_to_string(&desktop_path) {
-        Ok(existing) => existing != desktop_content,
-        Err(_) => true,
-    };
-    if need_write_desktop {
+    // Never overwrite an existing user-managed entry. In particular, AppImage
+    // Hub can manage its own AppImage; regenerating this file on every launch
+    // would replace that entry's Exec/category with the temporary mounted path.
+    let mut wrote_entry = false;
+    if !desktop_path.exists() {
         let _ = std::fs::create_dir_all(&apps_dir);
         let _ = std::fs::write(&desktop_path, &desktop_content);
         let _ = set_entry_permissions(&desktop_path);
+        wrote_entry = true;
+    }
 
-        // Also write appimage-manager.desktop alias in case compositor matches process name
-        let alt_desktop = apps_dir.join("appimage-manager.desktop");
+    // Also provide a process-name alias for compositors that match the binary
+    // name rather than the window app_id, without clobbering a managed app.
+    let alt_desktop = apps_dir.join("appimage-manager.desktop");
+    if !alt_desktop.exists() {
         let _ = std::fs::write(&alt_desktop, &desktop_content);
         let _ = set_entry_permissions(&alt_desktop);
+        wrote_entry = true;
+    }
 
+    if wrote_entry {
         refresh_menu_cache(&apps_dir);
     }
 }

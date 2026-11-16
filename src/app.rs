@@ -753,6 +753,7 @@ impl ManagerApp {
             category,
             custom_category,
             category_user_selected: true,
+            detected_category: None,
             startup_notify: entry.startup_notify,
             mode,
             local_path: entry.local_path.display().to_string(),
@@ -1249,12 +1250,7 @@ impl ManagerApp {
             // an explicit selection must always survive metadata detection.
             if !self.side_panel_form.category_user_selected {
                 if let Some(cat) = meta.matched_category {
-                    if meta.is_custom_category {
-                        self.side_panel_form.category = "Custom".to_string();
-                        self.side_panel_form.custom_category = cat;
-                    } else {
-                        self.side_panel_form.category = cat;
-                    }
+                    self.side_panel_form.detected_category = Some(cat);
                 }
             }
 
@@ -1296,19 +1292,7 @@ impl ManagerApp {
 
         if !self.side_panel_form.category_user_selected {
             if let Some(raw) = meta.categories.as_deref() {
-                let cat = raw.trim().trim_end_matches(';').trim();
-                if !cat.is_empty() {
-                    if let Some((_, value)) = crate::ui::side_panel::KDE_CATEGORIES
-                        .iter()
-                        .find(|(_, value)| *value == cat)
-                    {
-                        self.side_panel_form.category = (*value).to_string();
-                        self.side_panel_form.custom_category.clear();
-                    } else {
-                        self.side_panel_form.category = "Custom".to_string();
-                        self.side_panel_form.custom_category = cat.to_string();
-                    }
-                }
+                apply_detected_category(&mut self.side_panel_form, raw);
             }
         }
 
@@ -1563,16 +1547,7 @@ impl ManagerApp {
                 Some(c.to_string())
             }
         };
-        let categories = {
-            let cat = form.effective_category();
-            if cat.is_empty() {
-                Some("Utility;".to_string())
-            } else if cat.ends_with(';') {
-                Some(cat)
-            } else {
-                Some(format!("{cat};"))
-            }
-        };
+        let categories = submitted_categories(&form);
         let startup_notify = form.startup_notify;
         let asset_preference =
             if form.asset_selection_mode == crate::ui::side_panel::AssetSelectionMode::Manual {
@@ -2627,6 +2602,44 @@ fn ensure_trailing_semicolon(category: &str) -> String {
     }
 }
 
+/// Applies an XDG category list detected from AppImage/sidecar metadata,
+/// using the same primary-category mapping as the embedded-desktop reader.
+fn apply_detected_category(form: &mut crate::ui::side_panel::SidePanelFormState, raw: &str) {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return;
+    }
+    let (category, _is_custom) = crate::appimage::map_kde_category(raw);
+    if !form.category_user_selected {
+        form.detected_category = Some(category);
+    }
+}
+
+/// Category value submitted for the current form. GitHub-only installs return
+/// `None` unless the user made an explicit category choice, so the downloaded
+/// AppImage's internal metadata can supply the category.
+fn submitted_categories(form: &crate::ui::side_panel::SidePanelFormState) -> Option<String> {
+    if form.category_user_selected {
+        return Some(ensure_trailing_semicolon(&form.effective_category()));
+    }
+
+    if matches!(
+        form.mode,
+        crate::ui::side_panel::SidePanelMode::LocalOnly
+            | crate::ui::side_panel::SidePanelMode::LocalWithRepo
+    ) {
+        return Some(
+            form.detected_category
+                .as_deref()
+                .map(ensure_trailing_semicolon)
+                .unwrap_or_else(|| "Utility;".to_string()),
+        );
+    }
+
+    // GitHub-only installs resolve the category from the downloaded AppImage.
+    None
+}
+
 /// Resolves the `Categories=` value written to the menu entry.
 ///
 /// The category the user picked in the Add/Edit form always wins; the
@@ -2718,6 +2731,63 @@ mod tests {
     fn trailing_semicolon_is_not_duplicated() {
         assert_eq!(ensure_trailing_semicolon("Game;"), "Game;");
         assert_eq!(ensure_trailing_semicolon(" Game "), "Game;");
+    }
+
+    #[test]
+    fn detected_categories_use_primary_kde_mapping_without_changing_selector() {
+        let mut form = crate::ui::side_panel::SidePanelFormState {
+            category: "Utility".to_string(),
+            ..Default::default()
+        };
+        apply_detected_category(&mut form, "Game;Emulator;");
+        assert_eq!(form.category, "Utility");
+        assert_eq!(form.detected_category.as_deref(), Some("Game"));
+
+        apply_detected_category(&mut form, "Science;Math;");
+        assert_eq!(form.category, "Utility");
+        assert_eq!(form.detected_category.as_deref(), Some("Science"));
+
+        apply_detected_category(&mut form, "UnknownCategory;");
+        assert_eq!(form.category, "Utility");
+        assert_eq!(form.detected_category.as_deref(), Some("UnknownCategory"));
+    }
+
+    #[test]
+    fn github_install_uses_inner_category_when_user_has_not_selected() {
+        let mut form = crate::ui::side_panel::SidePanelFormState {
+            mode: crate::ui::side_panel::SidePanelMode::GithubOnly,
+            ..Default::default()
+        };
+        assert_eq!(submitted_categories(&form), None);
+
+        form.category_user_selected = true;
+        form.category = "Graphics".to_string();
+        assert_eq!(submitted_categories(&form).as_deref(), Some("Graphics;"));
+
+        // Explicitly choosing the default Utility category must not fall back
+        // to the AppImage's internal category.
+        form.category = "Utility".to_string();
+        assert_eq!(submitted_categories(&form).as_deref(), Some("Utility;"));
+    }
+
+    #[test]
+    fn local_import_submits_detected_category() {
+        let form = crate::ui::side_panel::SidePanelFormState {
+            mode: crate::ui::side_panel::SidePanelMode::LocalOnly,
+            category: "Utility".to_string(),
+            detected_category: Some("AudioVideo".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(submitted_categories(&form).as_deref(), Some("AudioVideo;"));
+
+        let default_form = crate::ui::side_panel::SidePanelFormState {
+            mode: crate::ui::side_panel::SidePanelMode::LocalOnly,
+            ..Default::default()
+        };
+        assert_eq!(
+            submitted_categories(&default_form).as_deref(),
+            Some("Utility;")
+        );
     }
 
     #[test]

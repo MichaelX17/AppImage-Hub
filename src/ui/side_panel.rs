@@ -103,6 +103,9 @@ pub struct SidePanelFormState {
     /// Set once the user explicitly picks a category, so metadata
     /// auto-detection can never overwrite their choice.
     pub category_user_selected: bool,
+    /// Category detected from the selected AppImage/sidecar. Kept separate so
+    /// the selector can remain on its Utility default until the user chooses.
+    pub detected_category: Option<String>,
     pub startup_notify: bool,
     pub mode: SidePanelMode,
     pub local_path: String,
@@ -126,6 +129,7 @@ impl Default for SidePanelFormState {
             category: "Utility".to_string(),
             custom_category: String::new(),
             category_user_selected: false,
+            detected_category: None,
             startup_notify: true,
             mode: SidePanelMode::default(),
             local_path: String::new(),
@@ -465,23 +469,29 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
             .unwrap_or("Custom Category…")
     };
 
-    let category_before = mgr.side_panel_form.category.clone();
     egui::ComboBox::from_id_salt("kde_category_combo")
         .selected_text(selected_label)
         .width(width.max(80.0))
         .show_ui(ui, |ui| {
-            for (label, val) in KDE_CATEGORIES {
-                ui.selectable_value(&mut mgr.side_panel_form.category, val.to_string(), *label);
+            let mut categories: Vec<(&str, Option<&str>)> = KDE_CATEGORIES
+                .iter()
+                .map(|(label, value)| (*label, Some(*value)))
+                .collect();
+            categories.push(("Custom Category…", None));
+            categories.sort_unstable_by(|a, b| a.0.cmp(b.0));
+
+            for (label, value) in categories {
+                let selected = match value {
+                    Some(value) => mgr.side_panel_form.category == value,
+                    None => mgr.side_panel_form.category == "Custom",
+                };
+                if ui.selectable_label(selected, label).clicked() {
+                    mgr.side_panel_form.category = value.unwrap_or("Custom").to_string();
+                    mgr.side_panel_form.category_user_selected = true;
+                    mgr.side_panel_form.detected_category = None;
+                }
             }
-            ui.selectable_value(
-                &mut mgr.side_panel_form.category,
-                "Custom".to_string(),
-                "Custom Category…",
-            );
         });
-    if mgr.side_panel_form.category != category_before {
-        mgr.side_panel_form.category_user_selected = true;
-    }
 
     if mgr.side_panel_form.category == "Custom" {
         ui.add_space(theme::SPACE_XS);
