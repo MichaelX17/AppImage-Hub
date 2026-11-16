@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": "io.github.michaelx17.AppImageHub",
+  "display_name": "AppImage Hub",
+  "generic_name": "AppImage Manager",
+  "comment": "Manage, launch, and update AppImages",
+  "categories": "Utility;",
+  "startup_notify": true,
+  "args": [],
+  "source": {
+    "type": "github_only",
+    "github_repo": "https://github.com/MichaelX17/AppImage-Hub"
+  },
+  "current_version": "0.1.0",
+  "asset_preference": "AppImage-Hub-x86_64.AppImage",
+  "file": "AppImage-Hub-x86_64.AppImage",
+  "icon": "appimage-hub.png"
+}

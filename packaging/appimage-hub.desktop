@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=AppImage Hub
+GenericName=AppImage Manager
+Comment=Manage, launch, and update AppImages
+Exec=appimage-manager %F
+Icon=appimage-hub
+Terminal=false
+StartupNotify=true
+StartupWMClass=appimage-hub
+Categories=Utility;
+Keywords=AppImage;Manager;Linux;Package;
+X-AppImage-Version=0.1.0
+X-AppImage-Name=AppImage Hub
+X-AppImage-Comment=Manage, launch, and update AppImages
+X-AppImage-Categories=Utility;
+X-AppImage-Icon=appimage-hub

@@ -175,6 +175,40 @@ pub enum RetryAction {
 }
 
 #[derive(Debug, Clone)]
+pub struct UpdateCheckProgress {
+    pending: HashSet<String>,
+    total: usize,
+    /// Smoothly animated value shown by the progress button.
+    display_fraction: f32,
+}
+
+impl UpdateCheckProgress {
+    /// Smooth, steady fill speed. The bar takes about three seconds to cross
+    /// the button, even if all network checks finish much sooner.
+    const FILL_PER_SECOND: f32 = 0.35;
+
+    fn target_fraction(&self) -> f32 {
+        if self.total == 0 {
+            return 0.0;
+        }
+        (self.total.saturating_sub(self.pending.len())) as f32 / self.total as f32
+    }
+
+    pub(crate) fn fraction(&self) -> f32 {
+        self.display_fraction
+    }
+
+    fn tick(&mut self, dt: f32) -> bool {
+        let target = self.target_fraction();
+        if self.display_fraction < target {
+            self.display_fraction =
+                (self.display_fraction + dt * Self::FILL_PER_SECOND).min(target);
+        }
+        self.pending.is_empty() && self.display_fraction >= 1.0
+    }
+}
+
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct FailedOp {
     pub app_id: Option<String>,
@@ -220,6 +254,7 @@ pub struct ManagerApp {
     /// Guards the one-shot auto-check performed on startup.
     pub(crate) auto_check_done: bool,
     pub(crate) sort_by: AppSortBy,
+    pub(crate) update_check: Option<UpdateCheckProgress>,
 }
 
 pub fn setup_custom_style(ctx: &egui::Context) {
@@ -273,6 +308,7 @@ impl ManagerApp {
             last_checked: None,
             auto_check_done: false,
             sort_by: AppSortBy::Name,
+            update_check: None,
         };
         if !app.first_run_setup {
             app.repair_missing_icons();
@@ -365,9 +401,28 @@ impl ManagerApp {
             });
     }
 
-    pub(crate) fn send_cmd(&mut self, cmd: BackendCommand) {
+    pub(crate) fn send_cmd(&mut self, cmd: BackendCommand) -> bool {
         if self.cmd_tx.try_send(cmd).is_err() {
             self.status = Some("System busy, please try again.".into());
+            return false;
+        }
+        true
+    }
+
+    fn finish_update_check_item(&mut self, app_id: &str) {
+        if let Some(progress) = self.update_check.as_mut() {
+            progress.pending.remove(app_id);
+        }
+    }
+
+    fn tick_update_check(&mut self, ctx: &egui::Context) {
+        let dt = ctx.input(|input| input.stable_dt).min(0.1);
+        let finished = self
+            .update_check
+            .as_mut()
+            .is_some_and(|progress| progress.tick(dt));
+        if finished {
+            self.update_check = None;
         }
     }
 
@@ -421,11 +476,13 @@ impl ManagerApp {
                 url,
                 asset_name,
             } => {
+                self.finish_update_check_item(&app_id);
                 self.last_checked = Some(Instant::now());
                 self.latest_versions.insert(app_id.clone(), tag.clone());
                 self.update_available.insert(app_id, (tag, url, asset_name));
             }
             BackendEvent::UpToDate { app_id, tag } => {
+                self.finish_update_check_item(&app_id);
                 self.last_checked = Some(Instant::now());
                 self.latest_versions.insert(app_id.clone(), tag);
                 self.update_available.remove(&app_id);
@@ -502,6 +559,9 @@ impl ManagerApp {
                 app_id,
                 message,
             } => {
+                if let Some(app_id) = app_id.as_deref() {
+                    self.finish_update_check_item(app_id);
+                }
                 self.status = Some(format!("Error: {message}"));
                 let (label, retry) = if let Some(op_id) = op_id {
                     if let Some(op) = self.ops.remove(&op_id) {
@@ -979,10 +1039,13 @@ impl ManagerApp {
                 self.update_all();
             }
 
-            let check_clicked = ui
-                .add(crate::ui::theme::secondary_button("Check All Updates"))
-                .clicked();
-            if check_clicked {
+            let check_progress = self
+                .update_check
+                .as_ref()
+                .map(UpdateCheckProgress::fraction);
+            let checking = check_progress.is_some();
+            let check_clicked = check_updates_button(ui, check_progress, !checking).clicked();
+            if check_clicked && !checking {
                 self.check_all_updates();
             }
 
@@ -1035,7 +1098,15 @@ impl ManagerApp {
                         ui.close_menu();
                     }
 
-                    let check_clicked = ui.button("Check All Updates").clicked();
+                    let checking = self.update_check.is_some();
+                    let check_label = if checking {
+                        "Checking updates…"
+                    } else {
+                        "Check All Updates"
+                    };
+                    let check_clicked = ui
+                        .add_enabled(!checking, egui::Button::new(check_label))
+                        .clicked();
                     if check_clicked {
                         self.check_all_updates();
                         ui.close_menu();
@@ -1064,6 +1135,10 @@ impl ManagerApp {
     }
 
     pub(crate) fn check_all_updates(&mut self) {
+        if self.update_check.is_some() {
+            return;
+        }
+
         let ids: Vec<String> = self
             .config
             .lock()
@@ -1080,8 +1155,26 @@ impl ManagerApp {
                     .collect()
             })
             .unwrap_or_default();
+
+        if ids.is_empty() {
+            self.status = Some("No GitHub-tracked apps to check.".into());
+            return;
+        }
+
+        let mut pending = HashSet::new();
         for app_id in ids {
-            self.send_cmd(BackendCommand::CheckUpdate { app_id });
+            if self.send_cmd(BackendCommand::CheckUpdate {
+                app_id: app_id.clone(),
+            }) {
+                pending.insert(app_id);
+            }
+        }
+        if !pending.is_empty() {
+            self.update_check = Some(UpdateCheckProgress {
+                total: pending.len(),
+                pending,
+                display_fraction: 0.0,
+            });
         }
     }
 
@@ -1689,7 +1782,6 @@ impl eframe::App for ManagerApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        crate::ui::theme::apply_style(ctx);
         if self.first_run_setup {
             self.render_first_run_setup(ctx);
             return;
@@ -1698,6 +1790,7 @@ impl eframe::App for ManagerApp {
         while let Ok(evt) = self.evt_rx.try_recv() {
             self.apply_event(evt);
         }
+        self.tick_update_check(ctx);
 
         // One-shot auto-check on startup, honouring the persisted preference.
         if !self.auto_check_done {
@@ -1824,7 +1917,77 @@ impl eframe::App for ManagerApp {
         if !self.ops.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
+        if self.update_check.is_some() {
+            // Keep the progress animation at display refresh rate.
+            ctx.request_repaint();
+        }
     }
+}
+
+fn check_updates_button(ui: &mut egui::Ui, progress: Option<f32>, enabled: bool) -> egui::Response {
+    let text = match progress {
+        Some(fraction) => format!(
+            "Checking updates… {}%",
+            (fraction.clamp(0.0, 1.0) * 100.0).round() as i32
+        ),
+        None => "Check All Updates".to_string(),
+    };
+    let desired = egui::vec2(176.0, ui.spacing().interact_size.y.max(32.0));
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(desired, sense);
+
+    if enabled && response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    let fill = if enabled && response.hovered() {
+        crate::ui::theme::SURFACE_HOVER
+    } else {
+        crate::ui::theme::NEUTRAL
+    };
+    let stroke = if enabled && response.hovered() {
+        crate::ui::theme::ACCENT_HOVER
+    } else {
+        crate::ui::theme::with_alpha(crate::ui::theme::BORDER, 180)
+    };
+    let radius = egui::CornerRadius::same(crate::ui::theme::RADIUS_PILL);
+
+    ui.painter().rect_filled(rect, radius, fill);
+    ui.painter().rect_stroke(
+        rect,
+        radius,
+        egui::Stroke::new(1.0_f32, stroke),
+        egui::StrokeKind::Inside,
+    );
+
+    if let Some(fraction) = progress {
+        let fraction = fraction.clamp(0.0, 1.0);
+        if fraction > 0.0 {
+            let progress_rect = egui::Rect::from_min_max(
+                rect.min,
+                egui::pos2(rect.left() + rect.width() * fraction, rect.bottom()),
+            );
+            ui.painter().with_clip_rect(progress_rect).rect_filled(
+                rect,
+                radius,
+                crate::ui::theme::ACCENT,
+            );
+        }
+    }
+
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        egui::FontId::proportional(13.0),
+        crate::ui::theme::TEXT_PRIMARY,
+    );
+
+    response
 }
 
 fn parse_args(s: &str) -> Vec<String> {
@@ -2555,6 +2718,31 @@ mod tests {
     fn trailing_semicolon_is_not_duplicated() {
         assert_eq!(ensure_trailing_semicolon("Game;"), "Game;");
         assert_eq!(ensure_trailing_semicolon(" Game "), "Game;");
+    }
+
+    #[test]
+    fn update_check_progress_animates_slowly_toward_target() {
+        let mut pending = HashSet::new();
+        pending.insert("a".to_string());
+        pending.insert("b".to_string());
+        let mut progress = UpdateCheckProgress {
+            pending,
+            total: 2,
+            display_fraction: 0.0,
+        };
+
+        progress.pending.remove("a");
+        progress.tick(1.0);
+        assert!((progress.fraction() - UpdateCheckProgress::FILL_PER_SECOND).abs() < f32::EPSILON);
+
+        progress.pending.remove("b");
+        progress.tick(1.0);
+        assert!(
+            (progress.fraction() - 2.0 * UpdateCheckProgress::FILL_PER_SECOND).abs() < f32::EPSILON
+        );
+        assert!(!progress.tick(0.5));
+        assert!(progress.tick(0.5));
+        assert!((progress.fraction() - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]

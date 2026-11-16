@@ -107,11 +107,7 @@ pub fn parse_desktop_entry(content: &str) -> DesktopFileMetadata {
                         meta.startup_notify = Some(val.eq_ignore_ascii_case("true"));
                     }
                 }
-                "Icon" => {
-                    if meta.icon.is_none() {
-                        meta.icon = Some(val.to_string());
-                    }
-                }
+                "Icon" if meta.icon.is_none() => meta.icon = Some(val.to_string()),
                 _ => {}
             }
         }

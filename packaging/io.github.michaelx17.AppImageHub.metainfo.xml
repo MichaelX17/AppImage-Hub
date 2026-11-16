@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.michaelx17.AppImageHub</id>
+  <name>AppImage Hub</name>
+  <summary>Manage, launch, and update AppImages</summary>
+  <description>
+    <p>
+      AppImage Hub is a desktop application for managing AppImage packages on Linux.
+      It can import local AppImages, download releases from GitHub, check for updates,
+      launch applications, and create desktop or start-menu entries.
+    </p>
+    <ul>
+      <li>Import and organize local AppImages</li>
+      <li>Track GitHub releases and download updates</li>
+      <li>Launch apps with custom arguments</li>
+      <li>Create desktop and application-menu shortcuts</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">appimage-hub.desktop</launchable>
+  <icon type="cached">appimage-hub</icon>
+  <developer id="io.github.michaelx17">
+    <name>MichaelX17</name>
+  </developer>
+  <categories>
+    <category>Utility</category>
+  </categories>
+  <url type="homepage">https://github.com/MichaelX17/AppImage-Hub</url>
+  <url type="bugtracker">https://github.com/MichaelX17/AppImage-Hub/issues</url>
+  <url type="vcs-browser">https://github.com/MichaelX17/AppImage-Hub</url>
+  <releases>
+    <release version="0.1.0" date="2026-11-15"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

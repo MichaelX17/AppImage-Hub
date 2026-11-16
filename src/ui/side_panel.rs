@@ -7,6 +7,7 @@ use crate::app::ManagerApp;
 use crate::ui::breakpoints::SizeClass;
 use crate::ui::theme;
 use eframe::egui::{self, Align, Color32, CornerRadius, Layout, Margin, RichText, Stroke};
+use std::path::Path;
 
 const FORM_INPUT_HEIGHT: f32 = 42.0;
 
@@ -268,40 +269,26 @@ pub fn render_add_to(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeC
     };
 
     theme::panel_frame().show(ui, |ui| {
-        draw_accent_rail(ui);
+        ui.set_min_height(ui.available_height());
 
-        ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::hover());
-            ui.painter()
-                .circle_filled(rect.center(), 15.0, theme::ACCENT_SOFT);
-            ui.painter()
-                .circle_stroke(rect.center(), 15.0, Stroke::new(1.0_f32, theme::ACCENT));
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "+",
-                egui::FontId::proportional(16.0),
-                theme::ACCENT_HOVER,
-            );
-            ui.add_space(theme::SPACE_SM);
-            ui.label(
-                RichText::new("Add to…")
-                    .size(20.0)
-                    .strong()
-                    .color(theme::TEXT_PRIMARY),
-            );
-        });
+        ui.label(
+            RichText::new("Add to…")
+                .size(32.0)
+                .strong()
+                .color(theme::TEXT_PRIMARY),
+        );
+        ui.add_space(theme::SPACE_XS);
+        ui.label(
+            theme::secondary_label(format!(
+                "Choose where to create shortcuts for {}.",
+                state.app_name
+            ))
+            .size(13.0),
+        );
 
-        ui.add_space(theme::SPACE_MD);
-        ui.separator();
-        ui.add_space(theme::SPACE_MD);
-
-        ui.label(RichText::new(&state.app_name).strong().size(16.0));
+        ui.add_space(theme::SPACE_LG);
+        ui.label(theme::section_heading("Targets"));
         ui.add_space(theme::SPACE_SM);
-        ui.label(theme::secondary_label(
-            "Choose where to add this application:",
-        ));
-        ui.add_space(theme::SPACE_MD);
 
         let desktop_path = crate::xdg::desktop_dir().ok().and_then(|d| {
             mgr.config.lock().ok().and_then(|c| {
@@ -321,55 +308,74 @@ pub fn render_add_to(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeC
         });
 
         if let Some(p) = &desktop_path {
-            let exists = p.exists();
-            ui.label(
-                theme::muted_label(format!(
-                    "Desktop: {}{}",
-                    p.display(),
-                    if exists { " (exists)" } else { "" }
-                ))
-                .size(11.0),
-            );
+            shortcut_target(ui, "Desktop shortcut", p);
         }
         if let Some(p) = &menu_path {
-            let exists = p.exists();
-            ui.label(
-                theme::muted_label(format!(
-                    "Menu: {}{}",
-                    p.display(),
-                    if exists { " (exists)" } else { "" }
-                ))
-                .size(11.0),
-            );
+            shortcut_target(ui, "Start menu entry", p);
         }
 
+        ui.add_space(theme::SPACE_LG);
+        ui.label(theme::section_heading("Shortcuts"));
         ui.add_space(theme::SPACE_SM);
         ui.checkbox(&mut state.desktop, "Desktop shortcut");
         ui.add_space(theme::SPACE_XS);
         ui.checkbox(&mut state.menu, "Start menu entry");
-        ui.add_space(theme::SPACE_MD);
+        ui.add_space(theme::SPACE_SM);
         ui.label(
             theme::muted_label("Checked = create/keep. Unchecked = remove if present.").size(11.0),
         );
 
         mgr.add_to = Some(state);
 
-        ui.add_space(theme::SPACE_LG);
-        ui.separator();
-        ui.add_space(theme::SPACE_SM);
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), 32.0),
-            Layout::right_to_left(Align::Min),
-            |ui| {
-                if ui.add(theme::primary_button("Apply")).clicked() {
-                    mgr.apply_add_to();
-                }
-                if ui.add(theme::ghost_button("Cancel")).clicked() {
-                    mgr.close_add_to();
-                }
-            },
-        );
+        // Keep the actions anchored at the bottom, matching the main form.
+        ui.add_space((ui.available_height() - 94.0).max(theme::SPACE_LG));
+        let button_width = ui.available_width();
+        if ui
+            .add_sized(
+                [button_width, FORM_INPUT_HEIGHT + 4.0],
+                form_primary_button("Apply"),
+            )
+            .clicked()
+        {
+            mgr.apply_add_to();
+        }
+        ui.add_space(theme::SPACE_XS);
+        if ui
+            .add_sized([button_width, 34.0], form_ghost_button("Cancel"))
+            .clicked()
+        {
+            mgr.close_add_to();
+        }
     });
+}
+
+fn shortcut_target(ui: &mut egui::Ui, label: &str, path: &Path) {
+    egui::Frame::new()
+        .fill(theme::SURFACE_RAISED)
+        .stroke(Stroke::new(1.0_f32, theme::BORDER))
+        .corner_radius(CornerRadius::same(theme::RADIUS_MD))
+        .inner_margin(Margin::symmetric(12, 9))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(theme::field_label(label));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if path.exists() {
+                        ui.label(
+                            RichText::new("exists")
+                                .size(10.0)
+                                .strong()
+                                .color(theme::ACCENT_HOVER),
+                        );
+                    }
+                });
+            });
+            ui.add(
+                egui::Label::new(theme::muted_label(path.display().to_string()).size(11.0))
+                    .truncate(),
+            )
+            .on_hover_text(path.display().to_string());
+        });
 }
 
 fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
@@ -871,23 +877,6 @@ fn validation_message(form: &SidePanelFormState) -> Option<&'static str> {
 
 /// Draw the accent left-rail using the panel's available rect.
 /// Uses a safe negative-x offset that works at any inner_margin size.
-fn draw_accent_rail(ui: &mut egui::Ui) {
-    let max = ui.max_rect();
-    if !max.is_finite() || max.width() <= 0.0 || max.height() <= 0.0 {
-        return;
-    }
-    // The panel_frame has inner_margin of SPACE_LG (16px) on the left.
-    // We paint a 3px rail just inside the left edge of the full panel rect.
-    // This avoids relying on exact margin values by anchoring to max_rect's left.
-    let rail_rect = egui::Rect::from_min_max(
-        egui::pos2(max.left() - 10.0, max.top()),
-        egui::pos2(max.left() - 7.0, max.bottom()),
-    );
-    if rail_rect.is_finite() && rail_rect.is_positive() {
-        ui.painter().rect_filled(rail_rect, 0.0, theme::ACCENT);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

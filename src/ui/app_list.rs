@@ -22,7 +22,13 @@ enum CardState {
 }
 
 /// Snapshot of an in-flight download for one card.
-type DownloadSnapshot = (String, f32, u64, Option<u64>, std::time::Instant);
+struct DownloadSnapshot {
+    op_id: String,
+    fraction: f32,
+    downloaded: u64,
+    total: Option<u64>,
+    started_at: std::time::Instant,
+}
 
 /// Per-card layout decisions derived from the available card width.
 struct CardLayout {
@@ -78,32 +84,29 @@ pub fn render(ui: &mut egui::Ui, apps: &[AppEntry], mgr: &mut ManagerApp, size_c
 }
 
 fn sort_apps(apps: &mut [&AppEntry], sort_by: AppSortBy) {
-    let by_name = |a: &&AppEntry, b: &&AppEntry| {
-        a.display_name
-            .to_lowercase()
-            .cmp(&b.display_name.to_lowercase())
-    };
-
     match sort_by {
-        AppSortBy::Name => apps.sort_by(by_name),
-        AppSortBy::Size => {
-            apps.sort_by(|a, b| app_size(b).cmp(&app_size(a)).then_with(|| by_name(a, b)))
+        AppSortBy::Name => apps.sort_by_cached_key(|app| app.display_name.to_lowercase()),
+        AppSortBy::Size => apps.sort_by_cached_key(|app| {
+            (
+                std::cmp::Reverse(app_size(app)),
+                app.display_name.to_lowercase(),
+            )
+        }),
+        AppSortBy::DateAdded => apps.sort_by_cached_key(|app| {
+            (
+                std::cmp::Reverse(app_added_at(app)),
+                app.display_name.to_lowercase(),
+            )
+        }),
+        AppSortBy::Github => apps.sort_by_cached_key(|app| {
+            (
+                std::cmp::Reverse(source_rank(app)),
+                app.display_name.to_lowercase(),
+            )
+        }),
+        AppSortBy::Local => {
+            apps.sort_by_cached_key(|app| (source_rank(app), app.display_name.to_lowercase()))
         }
-        AppSortBy::DateAdded => apps.sort_by(|a, b| {
-            app_added_at(b)
-                .cmp(&app_added_at(a))
-                .then_with(|| by_name(a, b))
-        }),
-        AppSortBy::Github => apps.sort_by(|a, b| {
-            source_rank(b)
-                .cmp(&source_rank(a))
-                .then_with(|| by_name(a, b))
-        }),
-        AppSortBy::Local => apps.sort_by(|a, b| {
-            source_rank(a)
-                .cmp(&source_rank(b))
-                .then_with(|| by_name(a, b))
-        }),
     }
 }
 
@@ -186,22 +189,21 @@ fn render_app_card(ui: &mut egui::Ui, mgr: &mut ManagerApp, app: &AppEntry) {
     let latest_tag = update_info.as_ref().map(|(tag, _, _)| tag.clone());
     let has_update = update_info.is_some();
 
-    let downloading: Option<DownloadSnapshot> =
-        if let AppDownloadState::Downloading(op) = mgr.app_download_state(&app.id) {
-            Some((
-                op.op_id.clone(),
-                op.fraction,
-                op.downloaded,
-                op.total,
-                op.started_at,
-            ))
-        } else {
-            None
-        };
-    let failed_msg = if let AppDownloadState::Failed(f) = mgr.app_download_state(&app.id) {
-        Some((f.message.clone(), f.retry.is_some()))
-    } else {
-        None
+    let (downloading, failed_msg) = match mgr.app_download_state(&app.id) {
+        AppDownloadState::Downloading(op) => (
+            Some(DownloadSnapshot {
+                op_id: op.op_id.clone(),
+                fraction: op.fraction,
+                downloaded: op.downloaded,
+                total: op.total,
+                started_at: op.started_at,
+            }),
+            None,
+        ),
+        AppDownloadState::Failed(failed) => {
+            (None, Some((failed.message.clone(), failed.retry.is_some())))
+        }
+        AppDownloadState::Idle => (None, None),
     };
 
     let card_state = if downloading.is_some() {
@@ -326,9 +328,7 @@ fn render_app_card(ui: &mut egui::Ui, mgr: &mut ManagerApp, app: &AppEntry) {
         // Close on Escape or on a click outside the menu / toggle.
         let pointer = ui.input(|i| i.pointer.interact_pos());
         let clicked_elsewhere = ui.input(|i| i.pointer.any_click())
-            && !pointer.map_or(false, |p| {
-                menu_rect.contains(p) || more_btn_rect.contains(p)
-            });
+            && !pointer.is_some_and(|p| menu_rect.contains(p) || more_btn_rect.contains(p));
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) || clicked_elsewhere {
             menu_open = false;
         }
@@ -394,7 +394,7 @@ fn render_info_block(
     // ── Repository / source ─────────────────────────────────────────────
     match source_text(app) {
         Some(repo) => {
-            ui.add(egui::Label::new(theme::muted_label(repo.clone()).size(12.0)).truncate())
+            ui.add(egui::Label::new(theme::muted_label(repo).size(12.0)).truncate())
                 .on_hover_text(repo);
         }
         None => {
@@ -476,17 +476,8 @@ fn render_actions(
 ) {
     match state {
         CardState::Downloading => {
-            if let Some((op_id, fraction, downloaded, total, started_at)) = downloading {
-                render_downloading(
-                    ui,
-                    layout,
-                    op_id,
-                    *fraction,
-                    *downloaded,
-                    *total,
-                    *started_at,
-                    &mut actions.cancel_op_id,
-                );
+            if let Some(download) = downloading {
+                render_downloading(ui, layout, download, &mut actions.cancel_op_id);
             }
         }
         CardState::Failed => {
@@ -502,13 +493,20 @@ fn render_actions(
 fn render_downloading(
     ui: &mut egui::Ui,
     layout: &CardLayout,
-    op_id: &str,
-    fraction: f32,
-    downloaded: u64,
-    total: Option<u64>,
-    started_at: std::time::Instant,
+    download: &DownloadSnapshot,
     cancel_op_id: &mut Option<String>,
 ) {
+    let DownloadSnapshot {
+        op_id,
+        fraction,
+        downloaded,
+        total,
+        started_at,
+    } = download;
+    let fraction = *fraction;
+    let downloaded = *downloaded;
+    let total = *total;
+    let started_at = *started_at;
     let fraction = if fraction.is_finite() {
         fraction.clamp(0.0, 1.0)
     } else {
@@ -628,10 +626,10 @@ fn render_idle_actions(
         }
     });
 }
-fn source_text(app: &AppEntry) -> Option<String> {
+fn source_text(app: &AppEntry) -> Option<&str> {
     match &app.source {
         AppSource::LocalWithRepo { github_repo } | AppSource::GithubOnly { github_repo } => {
-            Some(github_repo.clone())
+            Some(github_repo.as_str())
         }
         AppSource::LocalOnly => None,
     }
@@ -736,13 +734,12 @@ mod tests {
         assert!(tight.compact);
     }
 
-    #[test]
-    fn test_sources() {
-        let local = AppEntry {
-            id: "1".into(),
-            display_name: "App".into(),
-            source: AppSource::LocalOnly,
-            local_path: std::path::PathBuf::from("/tmp/app.AppImage"),
+    fn sample_app(id: &str, name: &str, source: AppSource, added_at: Option<i64>) -> AppEntry {
+        AppEntry {
+            id: id.into(),
+            display_name: name.into(),
+            source,
+            local_path: std::path::PathBuf::from(format!("/tmp/{id}.AppImage")),
             current_version: String::new(),
             args: Vec::new(),
             icon_path: None,
@@ -751,8 +748,13 @@ mod tests {
             categories: None,
             startup_notify: true,
             asset_preference: None,
-            added_at: None,
-        };
+            added_at,
+        }
+    }
+
+    #[test]
+    fn test_sources() {
+        let local = sample_app("1", "App", AppSource::LocalOnly, None);
         assert!(source_text(&local).is_none());
 
         let repo = AppEntry {
@@ -761,6 +763,51 @@ mod tests {
             },
             ..local
         };
-        assert_eq!(source_text(&repo).as_deref(), Some("owner/repo"));
+        assert_eq!(source_text(&repo), Some("owner/repo"));
+    }
+
+    #[test]
+    fn sort_by_name_is_case_insensitive() {
+        let alpha = sample_app("1", "alpha", AppSource::LocalOnly, None);
+        let beta = sample_app("2", "Beta", AppSource::LocalOnly, None);
+        let mut apps = vec![&beta, &alpha];
+        sort_apps(&mut apps, AppSortBy::Name);
+        assert_eq!(
+            apps.iter()
+                .map(|app| app.display_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "Beta"]
+        );
+    }
+
+    #[test]
+    fn sort_by_date_added_uses_newest_first() {
+        let old = sample_app("1", "Old", AppSource::LocalOnly, Some(100));
+        let new = sample_app("2", "New", AppSource::LocalOnly, Some(200));
+        let mut apps = vec![&old, &new];
+        sort_apps(&mut apps, AppSortBy::DateAdded);
+        assert_eq!(apps[0].display_name, "New");
+        assert_eq!(apps[1].display_name, "Old");
+    }
+
+    #[test]
+    fn source_sort_puts_requested_source_first() {
+        let local = sample_app("1", "Local", AppSource::LocalOnly, None);
+        let github = sample_app(
+            "2",
+            "GitHub",
+            AppSource::GithubOnly {
+                github_repo: "owner/repo".into(),
+            },
+            None,
+        );
+
+        let mut apps = vec![&local, &github];
+        sort_apps(&mut apps, AppSortBy::Github);
+        assert_eq!(apps[0].display_name, "GitHub");
+
+        let mut apps = vec![&github, &local];
+        sort_apps(&mut apps, AppSortBy::Local);
+        assert_eq!(apps[0].display_name, "Local");
     }
 }
