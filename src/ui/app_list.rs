@@ -593,20 +593,7 @@ fn render_idle_actions(
         ui.spacing_mut().item_spacing = egui::vec2(theme::SPACE_SM, theme::SPACE_SM);
 
         if has_update {
-            // Glowing primary action: Update
-            let update = ui.add(theme::update_button());
-            let glow = if update.hovered() {
-                theme::ACCENT_HOVER
-            } else {
-                theme::with_alpha(theme::ACCENT, 190)
-            };
-            theme::draw_glow(ui, update.rect, theme::RADIUS_PILL, glow);
-            if update.clicked() {
-                actions.update = true;
-            }
-            if ui.add(theme::secondary_button("Launch")).clicked() {
-                actions.launch = true;
-            }
+            run_action_selector(ui, actions);
         } else {
             // Idle primary action: Launch
             let launch = ui.add(theme::primary_button("Launch"));
@@ -626,6 +613,38 @@ fn render_idle_actions(
         }
     });
 }
+fn run_action_selector(ui: &mut egui::Ui, actions: &mut CardActions) {
+    let mut chosen: Option<RunAction> = None;
+    egui::ComboBox::from_id_salt(ui.id().with("run_action"))
+        .selected_text(
+            RichText::new("Run...")
+                .size(13.0)
+                .strong()
+                .color(theme::TEXT_PRIMARY),
+        )
+        .width(104.0)
+        .show_ui(ui, |ui| {
+            if ui.selectable_label(false, "Launch").clicked() {
+                chosen = Some(RunAction::Launch);
+            }
+            if ui.selectable_label(false, "Update").clicked() {
+                chosen = Some(RunAction::Update);
+            }
+        });
+
+    match chosen {
+        Some(RunAction::Launch) => actions.launch = true,
+        Some(RunAction::Update) => actions.update = true,
+        None => {}
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RunAction {
+    Launch,
+    Update,
+}
+
 fn source_text(app: &AppEntry) -> Option<&str> {
     match &app.source {
         AppSource::LocalWithRepo { github_repo } | AppSource::GithubOnly { github_repo } => {

@@ -455,16 +455,6 @@ pub fn up_to_date_label(tag: &str) -> RichText {
     RichText::new(format!("{} - Up to date", tag)).color(SUCCESS)
 }
 
-/// Compact, glowing primary update action (used on app cards).
-pub fn update_button() -> egui::Button<'static> {
-    pill(
-        egui::Button::new(RichText::new("Update").color(Color32::WHITE).strong()),
-        ACCENT,
-        104.0,
-    )
-    .stroke(Stroke::new(1.0_f32, ACCENT_HOVER))
-}
-
 #[allow(dead_code)]
 pub fn status_dot(ui: &mut egui::Ui, color: Color32) {
     let avail = ui.available_size();
