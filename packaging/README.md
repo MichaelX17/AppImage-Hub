@@ -9,7 +9,7 @@ as an AppImage.
 AppDir/
 ├── AppRun
 ├── .DirIcon -> appimage-hub.png
-├── appimage-hub.desktop
+├── io.github.michaelx17.AppImageHub.desktop
 ├── appimage-hub.png
 ├── .appimage-hub.json
 └── usr/
@@ -24,8 +24,8 @@ AppDir/
 
 | Source file | Destination inside AppImage |
 | --- | --- |
-| `appimage-hub.desktop` | `/appimage-hub.desktop` |
-| `io.github.michaelx17.AppImageHub.metainfo.xml` | `/usr/share/metainfo/io.github.michaelx17.AppImageHub.metainfo.xml` |
+| `io.github.michaelx17.AppImageHub.desktop` | `/io.github.michaelx17.AppImageHub.desktop` |
+| `io.github.michaelx17.AppImageHub.appdata.xml` | `/usr/share/metainfo/io.github.michaelx17.AppImageHub.appdata.xml` |
 | `.appimage-hub.json` | `/.appimage-hub.json` |
 | `../assets/logo.png` | `/appimage-hub.png` and `/usr/share/icons/hicolor/512x512/apps/appimage-hub.png` |
 

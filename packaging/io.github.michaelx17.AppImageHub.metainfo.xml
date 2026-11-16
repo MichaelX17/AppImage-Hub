@@ -3,6 +3,7 @@
   <id>io.github.michaelx17.AppImageHub</id>
   <name>AppImage Hub</name>
   <summary>Manage, launch, and update AppImages</summary>
+  <metadata_license>CC0-1.0</metadata_license>
   <description>
     <p>
       AppImage Hub is a desktop application for managing AppImage packages on Linux.
@@ -16,8 +17,8 @@
       <li>Create desktop and application-menu shortcuts</li>
     </ul>
   </description>
-  <launchable type="desktop-id">appimage-hub.desktop</launchable>
-  <icon type="cached">appimage-hub</icon>
+  <launchable type="desktop-id">io.github.michaelx17.AppImageHub.desktop</launchable>
+  <icon type="stock">appimage-hub</icon>
   <developer id="io.github.michaelx17">
     <name>MichaelX17</name>
   </developer>
