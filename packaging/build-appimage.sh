@@ -16,6 +16,7 @@ APPDIR="$BUILD_DIR/AppDir"
 TOOLS_DIR="$BUILD_DIR/tools"
 DIST_DIR="$ROOT/dist"
 OUTPUT="$DIST_DIR/AppImage-Hub-${VERSION}-${ARCH}.AppImage"
+OUTPUT_TMP="$OUTPUT.tmp"
 
 echo "==> Building release binary"
 cargo build --release
@@ -63,8 +64,10 @@ if [ -z "$APPIMAGETOOL" ]; then
 fi
 
 echo "==> Creating $OUTPUT"
-ARCH="$ARCH" "$APPIMAGETOOL" --appimage-extract-and-run "$APPDIR" "$OUTPUT"
-chmod +x "$OUTPUT"
+rm -f "$OUTPUT_TMP"
+ARCH="$ARCH" "$APPIMAGETOOL" --appimage-extract-and-run "$APPDIR" "$OUTPUT_TMP"
+chmod +x "$OUTPUT_TMP"
+mv -f "$OUTPUT_TMP" "$OUTPUT"
 
 echo "==> Built: $OUTPUT"
 sha256sum "$OUTPUT"
