@@ -166,7 +166,7 @@ impl ManagerApp {
         }
         self.finish_update_check_item(app_id);
         let mut message: Option<String> = None;
-        if let Some((_, entry)) = removed {
+        if let Some((_, ref entry)) = removed {
             // Use the same roots the app was stored under (default + custom).
             let mut roots = self
                 .config
@@ -177,13 +177,13 @@ impl ManagerApp {
             // After a storage-folder change the old root is no longer
             // configured; recognize the managed folder name so deleting the
             // entry still removes its files.
-            if let Some(previous_root) = crate::storage::legacy_root_for_entry(&entry, &roots) {
+            if let Some(previous_root) = crate::storage::legacy_root_for_entry(entry, &roots) {
                 roots.push(previous_root);
             }
-            let outcome = crate::storage::delete_managed_entry(&entry, &roots);
+            let outcome = crate::storage::delete_managed_entry(entry, &roots);
 
             if let (Ok(d), Ok(a)) = (xdg::desktop_dir(), xdg::applications_dir()) {
-                let _ = desktop_entry::remove_entry(&entry, &d, &a);
+                let _ = desktop_entry::remove_entry(entry, &d, &a);
             }
 
             if outcome.skipped_outside_root {
@@ -209,8 +209,15 @@ impl ManagerApp {
         self.update_available.remove(app_id);
         self.latest_versions.remove(app_id);
         self.file_issues.remove(app_id);
+        self.refresh_apps_snapshot();
+        self.request_file_scan();
         if message.is_some() {
             self.status = message;
+        } else if let Some((_, entry)) = removed {
+            self.status = Some(format!(
+                "Deleted {} and removed its entry from config.toml.",
+                entry.display_name
+            ));
         }
     }
 

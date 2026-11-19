@@ -373,6 +373,25 @@ mod tests {
     }
 
     #[test]
+    fn removing_an_app_persists_to_config_file() -> Result<()> {
+        let dir = temp_dir("delete-entry");
+        let path = dir.join("config.toml");
+        let mut config = sample_config();
+        let id = config.applications[0].id.clone();
+        config.save_to(&path)?;
+
+        config.applications.retain(|app| app.id != id);
+        config.save_to(&path)?;
+
+        let loaded = Config::load_from(&path)?;
+        assert!(loaded.applications.iter().all(|app| app.id != id));
+        assert!(loaded.applications.is_empty());
+
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
     fn save_then_load_round_trips_all_fields() -> Result<()> {
         let dir = temp_dir("roundtrip");
         let path = dir.join("config.toml");
