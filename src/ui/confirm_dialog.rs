@@ -3,6 +3,15 @@ use crate::ui::theme;
 use eframe::egui::{self, RichText, Stroke};
 
 pub fn render(ctx: &egui::Context, mgr: &mut ManagerApp) {
+    if mgr.pending_delete.is_some() {
+        render_delete(ctx, mgr);
+    }
+    if mgr.pending_storage_change.is_some() {
+        render_storage_change(ctx, mgr);
+    }
+}
+
+fn render_delete(ctx: &egui::Context, mgr: &mut ManagerApp) {
     let Some(app_id) = mgr.pending_delete.clone() else {
         return;
     };
@@ -70,5 +79,68 @@ pub fn render(ctx: &egui::Context, mgr: &mut ManagerApp) {
 
     if request_close || modal.should_close() {
         mgr.pending_delete = None;
+    }
+}
+
+/// D4: changing the storage folder never moves existing AppImages. Explain
+/// that explicitly before applying the new root.
+fn render_storage_change(ctx: &egui::Context, mgr: &mut ManagerApp) {
+    let Some(new_path) = mgr.pending_storage_change.clone() else {
+        return;
+    };
+
+    let mut request_close = false;
+    let modal = egui::Modal::new(egui::Id::new("confirm_storage_change_modal"))
+        .backdrop_color(egui::Color32::from_black_alpha(175))
+        .frame(
+            egui::Frame::new()
+                .fill(theme::SURFACE_RAISED)
+                .stroke(Stroke::new(1.5_f32, theme::ACCENT))
+                .corner_radius(egui::CornerRadius::same(theme::RADIUS_LG))
+                .inner_margin(egui::Margin::same(theme::SPACE_LG as i8))
+                .shadow(egui::epaint::Shadow {
+                    offset: [0, 6],
+                    blur: 24,
+                    spread: 1,
+                    color: theme::with_alpha(theme::ACCENT, 80),
+                }),
+        )
+        .show(ctx, |ui| {
+            ui.set_width(440.0);
+
+            ui.label(
+                RichText::new("Change AppImage Folder?")
+                    .size(21.0)
+                    .strong()
+                    .color(theme::TEXT_PRIMARY),
+            );
+
+            ui.add_space(theme::SPACE_MD);
+            ui.label(
+                RichText::new(format!(
+                    "New downloads will be stored in {}.\n\nExisting AppImages stay in their \
+                     current folders and keep working; they are not moved automatically. \
+                     Move them manually if you want everything in the new folder.",
+                    new_path.display()
+                ))
+                .size(14.0)
+                .color(theme::TEXT_SECONDARY),
+            );
+            ui.add_space(theme::SPACE_LG);
+
+            ui.horizontal(|ui| {
+                if ui.add(theme::primary_button("Change Folder")).clicked() {
+                    mgr.confirm_storage_change();
+                    request_close = true;
+                }
+                if ui.add(theme::secondary_button("Cancel")).clicked() {
+                    mgr.pending_storage_change = None;
+                    request_close = true;
+                }
+            });
+        });
+
+    if request_close || modal.should_close() {
+        mgr.pending_storage_change = None;
     }
 }

@@ -21,7 +21,6 @@ pub const ACCENT: Color32 = Color32::from_rgb(0xA8, 0x55, 0xF7);
 pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xC0, 0x84, 0xFC);
 /// Bright green used for "Up to date" badges (`#22C55E`).
 pub const SUCCESS: Color32 = Color32::from_rgb(0x22, 0xC5, 0x5E);
-#[allow(dead_code)]
 pub const WARNING: Color32 = Color32::from_rgb(0xF5, 0x9E, 0x0B);
 pub const DANGER: Color32 = Color32::from_rgb(0xEF, 0x44, 0x44);
 pub const NEUTRAL: Color32 = Color32::from_rgb(0x35, 0x2E, 0x47);
@@ -46,7 +45,6 @@ pub const SPACE_XS: f32 = 4.0;
 pub const SPACE_SM: f32 = 8.0;
 pub const SPACE_MD: f32 = 12.0;
 pub const SPACE_LG: f32 = 16.0;
-#[allow(dead_code)]
 pub const SPACE_XL: f32 = 24.0;
 
 /// Content width of popup menu items (the frame adds its own margin).
@@ -217,7 +215,6 @@ pub fn ghost_button(text: impl Into<String>) -> egui::Button<'static> {
 }
 
 /// The toolbar "Add" action: high-visibility neon pill.
-#[allow(dead_code)]
 pub fn add_button(text: impl Into<String>) -> egui::Button<'static> {
     pill(
         egui::Button::new(RichText::new(text.into()).color(Color32::WHITE).strong()),
@@ -338,7 +335,6 @@ pub fn draw_glow(ui: &egui::Ui, rect: Rect, corner_radius: u8, color: Color32) {
 pub enum BadgeKind {
     Success,
     Accent,
-    #[allow(dead_code)]
     Warning,
     Danger,
     Neutral,
@@ -382,22 +378,7 @@ fn badge_colors(kind: BadgeKind) -> (Color32, Color32) {
         BadgeKind::Neutral => (TEXT_SECONDARY, NEUTRAL_SOFT),
     }
 }
-/// A small inline badge indicating an update is available.
-/// Uses both color and text so it is not color-alone.
-#[allow(dead_code)]
-pub fn update_available_label(tag: &str) -> RichText {
-    RichText::new(format!("• {} - Update available", tag))
-        .strong()
-        .color(ACCENT_HOVER)
-}
 
-/// Label for the "up to date" version status.
-#[allow(dead_code)]
-pub fn up_to_date_label(tag: &str) -> RichText {
-    RichText::new(format!("{} - Up to date", tag)).color(SUCCESS)
-}
-
-#[allow(dead_code)]
 pub fn status_dot(ui: &mut egui::Ui, color: Color32) {
     let avail = ui.available_size();
     if !avail.x.is_finite() || !avail.y.is_finite() || avail.x < 8.0 || avail.y < 8.0 {
@@ -429,18 +410,4 @@ pub fn field_label(text: impl Into<String>) -> RichText {
         .strong()
         .size(12.0)
         .color(TEXT_SECONDARY)
-}
-
-/// A labeled field row helper: renders `label` above `content` function with
-/// consistent spacing. Returns the result of `content`.
-#[allow(dead_code)]
-pub fn labeled_field<R>(
-    ui: &mut egui::Ui,
-    label: impl Into<String>,
-    content: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
-    ui.label(field_label(label.into()));
-    let r = content(ui);
-    ui.add_space(SPACE_MD);
-    r
 }

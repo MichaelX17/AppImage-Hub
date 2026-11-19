@@ -13,6 +13,41 @@ use std::path::{Path, PathBuf};
 /// Current on-disk schema version for the sidecar file.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Failure to load a sidecar, distinguishing "invalid and quarantined" from
+/// "written by a newer build, leave it alone".
+#[derive(Debug, thiserror::Error)]
+pub enum SidecarError {
+    #[error("failed to read {path}: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("invalid metadata in {path} (preserved at {quarantine}): {source}")]
+    Invalid {
+        path: PathBuf,
+        quarantine: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("invalid metadata in {path} and it could not be preserved: {quarantine_error}")]
+    InvalidNotPreserved {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+        quarantine_error: String,
+    },
+    #[error(
+        "metadata file {path} was written by a newer AppImage Hub \
+         (schema {found}, this build supports up to {supported})"
+    )]
+    UnsupportedSchema {
+        path: PathBuf,
+        found: u32,
+        supported: u32,
+    },
+}
+
 fn default_schema() -> u32 {
     SCHEMA_VERSION
 }
@@ -189,31 +224,76 @@ pub fn sidecar_path(appimage: &Path) -> PathBuf {
 /// Writes the metadata file next to the entry's AppImage.
 pub fn write_for_entry(entry: &AppEntry) -> Result<PathBuf> {
     let path = sidecar_path(&entry.local_path);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
     let meta = AppMetadataFile::from_entry(entry);
     let json = serde_json::to_string_pretty(&meta).context("failed to serialize app metadata")?;
-    std::fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
+    crate::fsutil::write_atomic(&path, json.as_bytes())
+        .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(path)
 }
 
 /// Reads a metadata file from an explicit path.
+#[cfg(test)]
 pub fn read(path: &Path) -> Result<AppMetadataFile> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    serde_json::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))
+    let meta: AppMetadataFile = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    validate_schema(path, &meta)?;
+    Ok(meta)
 }
 
-/// Reads the sidecar that belongs to `appimage`, if present and valid.
+/// Rejects sidecars from a newer build instead of silently downgrading them.
+/// Schema `0` is accepted for compatibility; the next write upgrades it to
+/// `SCHEMA_VERSION`.
+fn validate_schema(path: &Path, meta: &AppMetadataFile) -> Result<(), SidecarError> {
+    if meta.schema > SCHEMA_VERSION {
+        return Err(SidecarError::UnsupportedSchema {
+            path: path.to_path_buf(),
+            found: meta.schema,
+            supported: SCHEMA_VERSION,
+        });
+    }
+    Ok(())
+}
+
+/// Reads the sidecar that belongs to `appimage`, distinguishing a missing file
+/// (`Ok(None)`) from an unreadable or invalid one (`Err`).
+///
+/// Invalid JSON is quarantined as `<stem>.json.corrupt-<unix-seconds>` and the
+/// error names the quarantine path, so the caller can tell the user where the
+/// original data went instead of silently replacing it.
+pub fn read_for_appimage_result(appimage: &Path) -> Result<Option<AppMetadataFile>, SidecarError> {
+    let path = sidecar_path(appimage);
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(SidecarError::Read { path, source }),
+    };
+
+    match serde_json::from_str(&content) {
+        Ok(meta) => {
+            validate_schema(&path, &meta)?;
+            Ok(Some(meta))
+        }
+        Err(source) => match crate::fsutil::quarantine(&path) {
+            Ok(quarantine) => Err(SidecarError::Invalid {
+                path,
+                quarantine,
+                source,
+            }),
+            Err(quarantine_error) => Err(SidecarError::InvalidNotPreserved {
+                path,
+                source,
+                quarantine_error: format!("{quarantine_error:#}"),
+            }),
+        },
+    }
+}
+
+/// Best-effort variant of [`read_for_appimage_result`] used where a missing or
+/// invalid sidecar simply means "no cached metadata".
 pub fn read_for_appimage(appimage: &Path) -> Option<AppMetadataFile> {
-    read(&sidecar_path(appimage)).ok()
-}
-
-/// Best-effort removal of an entry's sidecar file.
-pub fn remove_for_entry(entry: &AppEntry) {
-    let _ = std::fs::remove_file(sidecar_path(&entry.local_path));
+    read_for_appimage_result(appimage).ok().flatten()
 }
 
 #[cfg(test)]
@@ -341,6 +421,85 @@ mod tests {
         let entry = sample_entry(appimage);
         let written = write_for_entry(&entry)?;
         assert!(written.exists());
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn corrupt_sidecar_is_quarantined() -> Result<()> {
+        let dir = temp_dir("corrupt");
+        let appimage = dir.join("example.appimage");
+        std::fs::write(&appimage, b"binary")?;
+        let path = sidecar_path(&appimage);
+        let garbage = b"{ this is not json";
+        std::fs::write(&path, garbage)?;
+
+        let error = read_for_appimage_result(&appimage).expect_err("invalid sidecar must fail");
+
+        let SidecarError::Invalid { quarantine, .. } = &error else {
+            panic!("expected Invalid error, got {error}");
+        };
+        assert!(error.to_string().contains("preserved at"));
+        assert!(!path.exists());
+        assert!(quarantine.exists());
+        assert_eq!(std::fs::read(quarantine)?, garbage);
+
+        // Best-effort readers see "no metadata" rather than crashing.
+        assert!(read_for_appimage(&appimage).is_none());
+
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn newer_sidecar_schema_is_rejected() -> Result<()> {
+        let dir = temp_dir("newer");
+        let appimage = dir.join("example.appimage");
+        std::fs::write(&appimage, b"binary")?;
+        let path = sidecar_path(&appimage);
+        let original = br#"{"schema": 99, "id": "future", "display_name": "Future"}"#;
+        std::fs::write(&path, original)?;
+
+        let error = read_for_appimage_result(&appimage).expect_err("newer schema must be rejected");
+
+        assert!(
+            matches!(
+                error,
+                SidecarError::UnsupportedSchema {
+                    found: 99,
+                    supported: SCHEMA_VERSION,
+                    ..
+                }
+            ),
+            "unexpected error: {error}"
+        );
+        // The newer file is neither quarantined nor overwritten.
+        assert!(path.exists());
+        assert_eq!(std::fs::read(&path)?, original);
+
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn schema_zero_is_upgraded_on_write() -> Result<()> {
+        let dir = temp_dir("schemazero");
+        let appimage = dir.join("example.appimage");
+        std::fs::write(&appimage, b"binary")?;
+        let path = sidecar_path(&appimage);
+        std::fs::write(
+            &path,
+            br#"{"schema": 0, "id": "keep-me", "display_name": "Old"}"#,
+        )?;
+
+        let meta = read_for_appimage_result(&appimage)?.expect("sidecar should load");
+        assert_eq!(meta.schema, 0);
+
+        write_for_entry(&meta.to_entry(appimage.clone()))?;
+        let rewritten: AppMetadataFile = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+        assert_eq!(rewritten.schema, SCHEMA_VERSION);
+        assert_eq!(rewritten.id, "keep-me");
+
         std::fs::remove_dir_all(&dir)?;
         Ok(())
     }

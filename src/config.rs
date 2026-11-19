@@ -1,9 +1,18 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
+/// Bumped after every config write so the UI can cache an app snapshot and
+/// rebuild it only when something actually changed.
+static CONFIG_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Monotonic counter of successful config writes.
+pub fn generation() -> u64 {
+    CONFIG_GENERATION.load(Ordering::Relaxed)
+}
 
 /// Directory containing the actual running executable. For an AppImage this
 /// resolves the original `.AppImage` file via `$APPIMAGE`, not the temporary
@@ -20,15 +29,24 @@ pub fn executable_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// XDG config directory used for non-portable state, including secrets.
+///
+/// Secrets intentionally never follow portable mode: a portable AppImage's
+/// folder is meant to be copied or uploaded, so credentials must not live
+/// there.
+pub fn xdg_config_dir() -> PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_else(|| PathBuf::from(".config"));
+    base.join("appimage-manager")
+}
+
 pub fn resolve_config_dir(app_dir: &Path, portable: bool) -> PathBuf {
     if portable {
         app_dir.join("AppImageHub.config")
     } else {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .unwrap_or_else(|| PathBuf::from(".config"));
-        base.join("appimage-manager")
+        xdg_config_dir()
     }
 }
 
@@ -41,12 +59,15 @@ pub fn config_dir() -> &'static Path {
             let portable = app_dir.join("portable.ini").exists();
             let dir = resolve_config_dir(&app_dir, portable);
             let _ = std::fs::create_dir_all(&dir);
+            // The config folder may also hold the encrypted GitHub token, so
+            // keep it private to the current user.
+            let _ = crate::fsutil::ensure_private_dir(&dir);
             dir
         })
         .as_path()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub applications: Vec<AppEntry>,
@@ -167,7 +188,7 @@ pub fn file_fingerprint_with_hash(path: &Path) -> Option<FileFingerprint> {
     Some(fingerprint)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppEntry {
     pub id: String, // UUID v4
     pub display_name: String,
@@ -226,26 +247,57 @@ pub enum AppSource {
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let path = Self::config_path();
-        if !path.exists() {
-            return Ok(Self::default());
+        Self::load_from(&Self::config_path())
+    }
+
+    /// Loads the config from an explicit path.
+    ///
+    /// A missing file yields defaults (first run). Any other I/O error is
+    /// reported. A file that exists but cannot be parsed is **quarantined**
+    /// (renamed to `config.toml.corrupt-<unix-seconds>`) before the error is
+    /// returned, so the original bytes are preserved and a later save can
+    /// never silently overwrite the user's data.
+    pub fn load_from(path: &Path) -> Result<Self> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to read {}", path.display()));
+            }
+        };
+
+        match toml::from_str(&content) {
+            Ok(config) => Ok(config),
+            Err(parse_error) => match crate::fsutil::quarantine(path) {
+                Ok(quarantine) => Err(parse_error).with_context(|| {
+                    format!(
+                        "failed to parse {} (the original file was preserved at {})",
+                        path.display(),
+                        quarantine.display()
+                    )
+                }),
+                Err(quarantine_error) => Err(parse_error).with_context(|| {
+                    format!(
+                        "failed to parse {} and the file could not be preserved: {quarantine_error:#}",
+                        path.display()
+                    )
+                }),
+            },
         }
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        let config: Self = toml::from_str(&content)
-            .with_context(|| format!("failed to parse {}", path.display()))?;
-        Ok(config)
     }
 
     pub fn save(&self) -> Result<()> {
-        let path = Self::config_path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
+        self.save_to(&Self::config_path())
+    }
+
+    /// Atomically writes the config to an explicit path.
+    pub fn save_to(&self, path: &Path) -> Result<()> {
         let content = toml::to_string_pretty(self).context("failed to serialize config")?;
-        std::fs::write(&path, content)
+        crate::fsutil::write_atomic(path, content.as_bytes())
             .with_context(|| format!("failed to write {}", path.display()))?;
+        CONFIG_GENERATION.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -273,5 +325,110 @@ mod tests {
         let resolved = resolve_config_dir(app_dir, false);
         assert!(resolved.ends_with("appimage-manager"));
         assert!(!resolved.ends_with("AppImageHub.config"));
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("aim-config-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn sample_config() -> Config {
+        Config {
+            applications: vec![AppEntry {
+                id: "1e5f2f5d-0000-4000-8000-000000000001".into(),
+                display_name: "Example".into(),
+                source: AppSource::LocalWithRepo {
+                    github_repo: "owner/example".into(),
+                },
+                local_path: PathBuf::from("/managed/Example/example.appimage"),
+                current_version: "v2.4.0".into(),
+                args: vec!["--flag".into(), "value with spaces".into()],
+                icon_path: Some(PathBuf::from("/managed/Example/icon.png")),
+                generic_name: Some("Example Tool".into()),
+                comment: Some("Does example things".into()),
+                categories: Some("Graphics;".into()),
+                startup_notify: false,
+                asset_preference: Some("Example-x86_64.AppImage".into()),
+                added_at: Some(1_700_000_000),
+                commit_hash: Some("deadbeef".into()),
+                file_fingerprint: Some(FileFingerprint {
+                    size: 42,
+                    mtime: 1_700_000_001,
+                    sha256: Some("abc123".into()),
+                }),
+                desktop_shortcut: true,
+                menu_entry: false,
+                mime_types: Some("x-scheme-handler/example;".into()),
+                exec_arg: Some("%U".into()),
+            }],
+            custom_download_dir: Some(PathBuf::from("/managed")),
+            auto_check_updates: false,
+            last_update_check: Some(1_700_000_002),
+            last_hub_update_check: Some(1_700_000_003),
+            hub_start_menu_shortcut: false,
+            hub_start_menu_category: "Development".into(),
+            hub_desktop_shortcut: true,
+        }
+    }
+
+    #[test]
+    fn save_then_load_round_trips_all_fields() -> Result<()> {
+        let dir = temp_dir("roundtrip");
+        let path = dir.join("config.toml");
+        let config = sample_config();
+
+        config.save_to(&path)?;
+        let loaded = Config::load_from(&path)?;
+
+        assert_eq!(loaded, config);
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn missing_config_returns_default() -> Result<()> {
+        let dir = temp_dir("missing");
+        let path = dir.join("config.toml");
+
+        let loaded = Config::load_from(&path)?;
+
+        assert_eq!(loaded, Config::default());
+        assert!(!path.exists());
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn corrupt_config_is_quarantined_and_reported() -> Result<()> {
+        let dir = temp_dir("corrupt");
+        let path = dir.join("config.toml");
+        let garbage = b"this is not toml = = = [[[";
+        std::fs::write(&path, garbage)?;
+
+        let error = Config::load_from(&path).expect_err("corrupt config must not load");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("preserved at"),
+            "error should name the quarantine file, got: {message}"
+        );
+
+        // The original file is gone from its old name but its bytes survive.
+        assert!(!path.exists());
+        let quarantined: Vec<PathBuf> = std::fs::read_dir(&dir)?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|candidate| {
+                candidate
+                    .file_name()
+                    .map(|name| name.to_string_lossy().contains(".corrupt-"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(quarantined.len(), 1, "expected exactly one quarantine file");
+        assert_eq!(std::fs::read(&quarantined[0])?, garbage);
+
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
     }
 }

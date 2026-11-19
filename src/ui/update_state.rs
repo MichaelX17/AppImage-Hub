@@ -13,7 +13,7 @@ use crate::ui::theme;
 use eframe::egui::{self, Align, CornerRadius, Layout, Margin, RichText, Stroke};
 
 pub fn render(ctx: &egui::Context, mgr: &mut ManagerApp, size_class: SizeClass) {
-    let app_count = mgr.config.lock().map(|c| c.applications.len()).unwrap_or(0);
+    let app_count = mgr.app_count();
     let has_activity = !mgr.ops.is_empty() || !mgr.failed_ops.is_empty();
 
     egui::TopBottomPanel::bottom("status_footer")
@@ -45,15 +45,17 @@ pub fn render(ctx: &egui::Context, mgr: &mut ManagerApp, size_class: SizeClass) 
 
 /// Aggregate progress view for all current downloads.
 fn render_progress(ui: &mut egui::Ui, mgr: &mut ManagerApp, size_class: SizeClass) {
-    let mut ops: Vec<ActiveOp> = mgr.ops.values().cloned().collect();
+    // Borrow the live operations and failures; never clone them per frame.
+    let mut ops: Vec<&ActiveOp> = mgr.ops.values().collect();
     ops.sort_by_key(|op| op.started_at);
-    let failed = mgr.failed_ops.clone();
+    let has_ops = !ops.is_empty();
+    let failed: &[FailedOp] = &mgr.failed_ops;
 
     let mut cancel_id: Option<String> = None;
     let mut retry_idx: Option<usize> = None;
     let mut dismiss_idx: Option<usize> = None;
 
-    if !ops.is_empty() {
+    if has_ops {
         ui.horizontal_wrapped(|ui| {
             ui.label(
                 RichText::new("Progress")
@@ -84,7 +86,7 @@ fn render_progress(ui: &mut egui::Ui, mgr: &mut ManagerApp, size_class: SizeClas
                 render_active_row(ui, op, &mut cancel_id);
             }
             if !failed.is_empty() {
-                render_failed_rows(ui, &failed, &ops, &mut retry_idx, &mut dismiss_idx);
+                render_failed_rows(ui, failed, has_ops, &mut retry_idx, &mut dismiss_idx);
             }
         });
 
@@ -108,16 +110,16 @@ fn render_active_row(ui: &mut egui::Ui, op: &ActiveOp, cancel_id: &mut Option<St
         }
         ui.horizontal(|ui| {
             // The stored label is already specific ("Update Codium").
-            let title = if op.label.trim().is_empty() {
+            let title: &str = if op.label.trim().is_empty() {
                 match op.kind {
-                    OpKind::Install => "Installing".to_string(),
-                    OpKind::Update => "Updating".to_string(),
+                    OpKind::Install => "Installing",
+                    OpKind::Update => "Updating",
                 }
             } else {
-                op.label.clone()
+                op.label.as_str()
             };
             ui.add(
-                egui::Label::new(RichText::new(&title).strong().color(theme::TEXT_PRIMARY))
+                egui::Label::new(RichText::new(title).strong().color(theme::TEXT_PRIMARY))
                     .truncate(),
             )
             .on_hover_text(title);
@@ -128,10 +130,22 @@ fn render_active_row(ui: &mut egui::Ui, op: &ActiveOp, cancel_id: &mut Option<St
             });
         });
 
-        let fraction = sanitize_fraction(op.fraction);
+        // Without a Content-Length the server gives no percentage; pulse the
+        // fill instead of leaving the bar stuck at 0%.
+        let unknown_total = op.total.is_none() && op.fraction < 1.0;
+        let fraction = if unknown_total {
+            let time = ui.input(|input| input.time) as f32;
+            0.08 + 0.72 * (0.5 + 0.5 * (time * 2.0).sin())
+        } else {
+            sanitize_fraction(op.fraction)
+        };
         let progress = format::format_progress(op.downloaded, op.total);
-        let eta = format::format_eta(op.started_at, op.downloaded, op.total);
-        let detail = format!("{}% • {} • ETA {}", percent_text(fraction), progress, eta);
+        let detail = if unknown_total {
+            format!("{progress} • total size unknown")
+        } else {
+            let eta = format::format_eta(op.started_at, op.downloaded, op.total);
+            format!("{}% • {} • ETA {}", percent_text(fraction), progress, eta)
+        };
         ui.add(
             egui::ProgressBar::new(fraction)
                 .text(RichText::new(detail).size(11.0))
@@ -145,11 +159,11 @@ fn render_active_row(ui: &mut egui::Ui, op: &ActiveOp, cancel_id: &mut Option<St
 fn render_failed_rows(
     ui: &mut egui::Ui,
     failed: &[FailedOp],
-    ops: &[ActiveOp],
+    has_ops: bool,
     retry_idx: &mut Option<usize>,
     dismiss_idx: &mut Option<usize>,
 ) {
-    if !ops.is_empty() {
+    if has_ops {
         ui.separator();
     }
     ui.horizontal(|ui| {
@@ -305,7 +319,7 @@ fn percent_text(fraction: f32) -> i32 {
 
 /// Weighted progress across every active operation. Falls back to the mean of
 /// per-operation fractions while content lengths are still unknown.
-fn overall_fraction(ops: &[ActiveOp]) -> Option<f32> {
+fn overall_fraction(ops: &[&ActiveOp]) -> Option<f32> {
     if ops.is_empty() {
         return None;
     }
@@ -376,14 +390,16 @@ mod tests {
 
     #[test]
     fn overall_fraction_is_byte_weighted_when_totals_are_known() {
-        let ops = vec![op(0.9, 90, Some(100)), op(0.0, 0, Some(300))];
+        let values = [op(0.9, 90, Some(100)), op(0.0, 0, Some(300))];
+        let ops: Vec<&ActiveOp> = values.iter().collect();
         let overall = overall_fraction(&ops).unwrap();
         assert!((overall - 0.225).abs() < 1e-4, "got {overall}");
     }
 
     #[test]
     fn overall_fraction_falls_back_to_mean_while_totals_are_unknown() {
-        let ops = vec![op(0.5, 10, None), op(0.25, 5, None)];
+        let values = [op(0.5, 10, None), op(0.25, 5, None)];
+        let ops: Vec<&ActiveOp> = values.iter().collect();
         let overall = overall_fraction(&ops).unwrap();
         assert!((overall - 0.375).abs() < 1e-4, "got {overall}");
     }

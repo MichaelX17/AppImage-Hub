@@ -4,6 +4,10 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 /// Freedesktop-compliant Exec quoting.
+///
+/// `%` is escaped as `%%` so a literal argument can never be interpreted as a
+/// field code. The placeholder in `exec_arg` stays unescaped (it is inserted by
+/// `build_exec`, not through this function).
 pub fn quote_exec_arg(arg: &str) -> String {
     if arg
         .chars()
@@ -11,16 +15,60 @@ pub fn quote_exec_arg(arg: &str) -> String {
     {
         arg.to_string()
     } else {
-        // Wrap in double quotes; escape backslash and double quote.
-        format!("\"{}\"", arg.replace('\\', "\\\\").replace('"', "\\\""))
+        // Wrap in double quotes; escape backslash, double quote, and `%`.
+        let escaped = arg
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('%', "%%");
+        format!("\"{escaped}\"")
     }
 }
 
-fn single_line(value: &str) -> String {
-    value.replace(['\r', '\n'], " ").trim().to_string()
+/// Replaces every control character (including newlines and tabs) with a space
+/// and trims the result, so no value can introduce a second `.desktop` key.
+fn sanitize_value(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
-fn sanitize_mime_types(raw: &str) -> Option<String> {
+/// Keeps only simple `[A-Za-z0-9-]` category tokens. Anything else (spaces,
+/// `=`, newlines, shell syntax) is dropped; the result always ends with `;`.
+pub fn sanitize_categories(raw: &str) -> String {
+    let values: Vec<&str> = raw
+        .split(';')
+        .map(str::trim)
+        .filter(|token| {
+            !token.is_empty()
+                && token
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        })
+        .collect();
+    if values.is_empty() {
+        "Utility;".to_string()
+    } else {
+        format!("{};", values.join(";"))
+    }
+}
+
+/// An icon path containing control characters is rejected outright rather than
+/// rewritten into a different (possibly attacker-chosen) path.
+fn sanitize_icon(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && !value.chars().any(char::is_control)).then(|| value.to_string())
+}
+
+pub fn normalize_mime_types(raw: &str) -> Option<String> {
     let values: Vec<&str> = raw
         .split(';')
         .map(str::trim)
@@ -86,20 +134,8 @@ pub fn legacy_id_filename(app_id: &str) -> String {
 
 pub fn desktop_file_content(app: &AppEntry) -> String {
     let exec = build_exec(app);
-    let display_name = single_line(&app.display_name);
-    let categories = app
-        .categories
-        .as_deref()
-        .map(str::trim)
-        .filter(|c| !c.is_empty())
-        .map(|c| {
-            if c.ends_with(';') {
-                c.to_string()
-            } else {
-                format!("{c};")
-            }
-        })
-        .unwrap_or_else(|| "Utility;".to_string());
+    let display_name = sanitize_value(&app.display_name);
+    let categories = sanitize_categories(app.categories.as_deref().unwrap_or("Utility"));
 
     let mut content = format!(
         "[Desktop Entry]\n\
@@ -109,14 +145,14 @@ pub fn desktop_file_content(app: &AppEntry) -> String {
     );
 
     if let Some(generic) = &app.generic_name {
-        let g = single_line(generic);
+        let g = sanitize_value(generic);
         if !g.is_empty() {
             content.push_str(&format!("GenericName={g}\n"));
         }
     }
 
     if let Some(comment) = &app.comment {
-        let c = single_line(comment);
+        let c = sanitize_value(comment);
         if !c.is_empty() {
             content.push_str(&format!("Comment={c}\n"));
         }
@@ -132,7 +168,7 @@ pub fn desktop_file_content(app: &AppEntry) -> String {
         categories,
     ));
 
-    if let Some(mime_types) = app.mime_types.as_deref().and_then(sanitize_mime_types) {
+    if let Some(mime_types) = app.mime_types.as_deref().and_then(normalize_mime_types) {
         content.push_str(&format!("MimeType={mime_types}\n"));
     }
 
@@ -157,8 +193,8 @@ pub fn desktop_file_content(app: &AppEntry) -> String {
         None
     };
 
-    if let Some(icon) = icon_to_use {
-        content.push_str(&format!("Icon={}\n", icon));
+    if let Some(icon) = icon_to_use.and_then(|icon| sanitize_icon(&icon)) {
+        content.push_str(&format!("Icon={icon}\n"));
     }
     content
 }
@@ -272,23 +308,44 @@ fn update_mimeapps_defaults(desktop_filename: &str, mime_types: Option<&str>) ->
         return Ok(());
     }
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
     if path.exists() {
         let backup = path.with_extension("list.bak");
         let _ = std::fs::copy(&path, backup);
     }
-    let tmp = path.with_extension("list.tmp");
-    std::fs::write(&tmp, out.join("\n") + "\n")
-        .with_context(|| format!("failed to write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("failed to replace {}", path.display()))?;
+    let content = out.join("\n") + "\n";
+    crate::fsutil::write_atomic(&path, content.as_bytes())
+        .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
 
+/// Coalesces menu-cache refreshes and runs them off the UI thread. Several
+/// shortcut writes within a second trigger one refresh.
 fn refresh_menu_cache(applications_dir: &Path) {
+    use std::sync::{mpsc, OnceLock};
+
+    static SENDER: OnceLock<mpsc::Sender<std::path::PathBuf>> = OnceLock::new();
+    let sender = SENDER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<std::path::PathBuf>();
+        std::thread::spawn(move || {
+            let mut pending: Option<std::path::PathBuf> = None;
+            loop {
+                match receiver.recv_timeout(std::time::Duration::from_secs(1)) {
+                    Ok(directory) => pending = Some(directory),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if let Some(directory) = pending.take() {
+                            run_menu_cache_commands(&directory);
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                }
+            }
+        });
+        sender
+    });
+    let _ = sender.send(applications_dir.to_path_buf());
+}
+
+fn run_menu_cache_commands(applications_dir: &Path) {
     let _ = std::process::Command::new("update-desktop-database")
         .arg(applications_dir)
         .stdout(std::process::Stdio::null())
@@ -304,6 +361,17 @@ fn refresh_menu_cache(applications_dir: &Path) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+}
+
+/// `gio set` is quick but still spawns a process; never do it inline.
+fn mark_trusted_async(path: std::path::PathBuf) {
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("gio")
+            .args(["set", &path.to_string_lossy(), "metadata::trusted", "true"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
 }
 
 /// Returns the .desktop content for AppImage Hub itself. The Exec path is
@@ -387,11 +455,7 @@ pub fn sync_hub_shortcuts(create_menu: bool, create_desktop: bool, start_menu_ca
             let _ = std::fs::create_dir_all(&desktop_dir);
             let _ = std::fs::write(&path, &content);
             let _ = set_entry_permissions(&path);
-            let _ = std::process::Command::new("gio")
-                .args(["set", &path.to_string_lossy(), "metadata::trusted", "true"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
+            mark_trusted_async(path.clone());
         } else {
             let _ = std::fs::remove_file(&path);
         }
@@ -435,11 +499,7 @@ pub fn write_desktop_shortcut(app: &AppEntry, desktop_dir: &Path) -> Result<()> 
         }
     }
     // Best-effort: mark trusted on desktops/environments that use gio metadata.
-    let _ = std::process::Command::new("gio")
-        .args(["set", &path.to_string_lossy(), "metadata::trusted", "true"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    mark_trusted_async(path);
     Ok(())
 }
 
@@ -478,19 +538,15 @@ pub fn remove_entry_files(
     Ok(())
 }
 
-#[allow(dead_code)]
-pub fn write_entry(app: &AppEntry, desktop_dir: &Path, applications_dir: &Path) -> Result<()> {
-    // Applications menu entry is required for Start Menu integration.
-    write_menu_entry(app, applications_dir)?;
-
-    // Desktop shortcut is best-effort.
-    let _ = write_desktop_shortcut(app, desktop_dir);
-
-    Ok(())
-}
-
 pub fn remove_entry(app: &AppEntry, desktop_dir: &Path, applications_dir: &Path) -> Result<()> {
     remove_entry_files(app, desktop_dir, applications_dir)
+}
+
+#[cfg(test)]
+pub fn write_entry(app: &AppEntry, desktop_dir: &Path, applications_dir: &Path) -> Result<()> {
+    write_menu_entry(app, applications_dir)?;
+    let _ = write_desktop_shortcut(app, desktop_dir);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -556,13 +612,76 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_categories_drops_unknown_tokens() {
+        assert_eq!(
+            sanitize_categories("Utility; Game;bad token;Evil=1;"),
+            "Utility;Game;"
+        );
+        assert_eq!(sanitize_categories(""), "Utility;");
+        assert_eq!(sanitize_categories(";;;"), "Utility;");
+    }
+
+    #[test]
+    fn category_with_newline_cannot_inject_exec() {
+        let mut app = sample_app(vec![]);
+        app.categories = Some("Utility;\nExec=sh -c evil".into());
+        let content = desktop_file_content(&app);
+        assert!(!content.contains("Exec=sh"));
+        assert!(content.contains("Categories=Utility;\n"));
+        assert_eq!(
+            content
+                .lines()
+                .filter(|line| line.starts_with("Exec="))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn icon_with_newline_is_rejected() {
+        let mut app = sample_app(vec![]);
+        app.icon_path = Some(PathBuf::from("/tmp/icon\nExec=evil.png"));
+        let content = desktop_file_content(&app);
+        assert!(!content.contains("Icon="));
+        assert!(!content.contains("Exec=evil"));
+    }
+
+    #[test]
+    fn exec_percent_is_escaped() {
+        assert_eq!(
+            quote_exec_arg("/tmp/100%.AppImage"),
+            "\"/tmp/100%%.AppImage\""
+        );
+        let app = sample_app(vec!["%f".into()]);
+        let exec = build_exec(&app);
+        assert!(exec.contains("\"%%f\""));
+        assert!(!exec.contains(" %f"));
+    }
+
+    #[test]
+    fn desktop_name_strips_control_chars() {
+        let mut app = sample_app(vec![]);
+        app.display_name = "Evil\nExec=sh -c bad".into();
+        let content = desktop_file_content(&app);
+        assert!(!content.lines().any(|line| line.starts_with("Exec=sh")));
+        assert_eq!(
+            content
+                .lines()
+                .filter(|line| line.starts_with("Exec="))
+                .count(),
+            1
+        );
+        assert!(content.contains("Name=Evil Exec=sh -c bad\n"));
+    }
+
+    #[test]
     fn mime_sanitization_keeps_valid_tokens_only() {
         assert_eq!(
-            sanitize_mime_types("x-scheme-handler/heroic; application/x-iso9660-image;bad\nmime")
+            normalize_mime_types("x-scheme-handler/heroic; application/x-iso9660-image;bad\nmime")
                 .as_deref(),
             Some("x-scheme-handler/heroic;application/x-iso9660-image;")
         );
-        assert_eq!(sanitize_mime_types(";;;"), None);
+        assert_eq!(normalize_mime_types(";;;"), None);
     }
 
     #[test]

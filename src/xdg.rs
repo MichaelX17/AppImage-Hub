@@ -91,30 +91,26 @@ pub fn managed_app_folder(hint: &str, id: &str) -> Result<PathBuf> {
     managed_app_folder_in(&base, hint, id)
 }
 
-pub fn managed_app_folder_in(base: &Path, hint: &str, id: &str) -> Result<PathBuf> {
-    std::fs::create_dir_all(base).context("failed to create managed apps base directory")?;
+/// Directory name used for a managed app: `<sanitized name>-<id prefix>`.
+pub fn managed_app_folder_name(hint: &str, id: &str) -> String {
     let safe_hint = sanitize_name(hint);
     let short_id: String = id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .take(8)
         .collect();
-    let folder_name = if short_id.is_empty() {
+    if short_id.is_empty() {
         safe_hint
     } else {
         format!("{safe_hint}-{short_id}")
-    };
-    let dir = base.join(folder_name);
-    std::fs::create_dir_all(&dir).context("failed to create per-app managed folder")?;
-    Ok(dir)
+    }
 }
 
-pub fn is_path_in_managed_apps(path: &Path) -> bool {
-    if let Ok(base) = managed_apps_dir() {
-        path.starts_with(base)
-    } else {
-        false
-    }
+pub fn managed_app_folder_in(base: &Path, hint: &str, id: &str) -> Result<PathBuf> {
+    std::fs::create_dir_all(base).context("failed to create managed apps base directory")?;
+    let dir = base.join(managed_app_folder_name(hint, id));
+    std::fs::create_dir_all(&dir).context("failed to create per-app managed folder")?;
+    Ok(dir)
 }
 
 /// Canonical file name used for a managed AppImage: `<sanitized name>.appimage`.

@@ -13,10 +13,19 @@ pub fn ensure_crypto_provider() {
 #[derive(Debug, Clone)]
 pub struct ReleaseInfo {
     pub tag: String,
-    #[allow(dead_code)]
-    pub asset_name: String,
     pub download_url: String,
     pub commit_hash: String,
+    /// Size reported by the GitHub release, used as an early sanity bound.
+    pub asset_size: u64,
+    /// `<asset>.sha256` / `<asset>.sha256sum` published in the same release.
+    pub checksum_url: Option<String>,
+}
+
+/// True when `checksum_name` is the published digest for `asset_name`.
+fn is_checksum_for_asset(checksum_name: &str, asset_name: &str) -> bool {
+    let lower = checksum_name.to_lowercase();
+    lower == format!("{}.sha256", asset_name.to_lowercase())
+        || lower == format!("{}.sha256sum", asset_name.to_lowercase())
 }
 
 fn normalize_repo(repo: &str) -> Result<(String, String)> {
@@ -171,7 +180,7 @@ pub async fn fetch_available_appimages(
     Ok(assets)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub async fn fetch_latest_release(client: &Octocrab, repo: &str) -> Result<ReleaseInfo> {
     fetch_latest_release_with_selector(client, repo, None).await
 }
@@ -279,6 +288,22 @@ pub async fn fetch_latest_release_with_selector(
             .unwrap()
     };
 
+    if asset.browser_download_url.scheme() != "https" {
+        anyhow::bail!(
+            "refusing to download from a non-HTTPS URL: {}",
+            asset.browser_download_url
+        );
+    }
+
+    let checksum_url = release
+        .assets
+        .iter()
+        .find(|candidate| {
+            is_checksum_for_asset(&candidate.name, &asset.name)
+                && candidate.browser_download_url.scheme() == "https"
+        })
+        .map(|candidate| candidate.browser_download_url.to_string());
+
     let commit_hash = resolve_release_commit(
         client,
         &owner,
@@ -290,15 +315,36 @@ pub async fn fetch_latest_release_with_selector(
 
     Ok(ReleaseInfo {
         tag: release.tag_name.clone(),
-        asset_name: asset.name.clone(),
         download_url: asset.browser_download_url.to_string(),
         commit_hash,
+        asset_size: asset.size.max(0) as u64,
+        checksum_url,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checksum_asset_matches_its_appimage() {
+        assert!(is_checksum_for_asset(
+            "MyApp-1.0-x86_64.AppImage.sha256",
+            "MyApp-1.0-x86_64.AppImage"
+        ));
+        assert!(is_checksum_for_asset(
+            "myapp-1.0-x86_64.appimage.SHA256SUM",
+            "MyApp-1.0-x86_64.AppImage"
+        ));
+        assert!(!is_checksum_for_asset(
+            "Other.sha256",
+            "MyApp-1.0-x86_64.AppImage"
+        ));
+        assert!(!is_checksum_for_asset(
+            "MyApp-1.0-x86_64.AppImage",
+            "MyApp-1.0-x86_64.AppImage"
+        ));
+    }
 
     #[test]
     fn normalize_repo_accepts_common_forms() -> Result<()> {
@@ -391,11 +437,6 @@ mod tests {
         let client = Octocrab::builder().build()?;
         let info = fetch_latest_release(&client, "obsidianmd/obsidian-releases").await?;
         assert!(!info.tag.is_empty(), "tag should not be empty");
-        assert!(
-            info.asset_name.to_lowercase().contains("appimage"),
-            "asset should be an AppImage: {}",
-            info.asset_name
-        );
         assert!(
             info.download_url.starts_with("http"),
             "download URL should be http(s): {}",

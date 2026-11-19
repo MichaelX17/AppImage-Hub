@@ -29,7 +29,7 @@
   <url type="bugtracker">https://github.com/MichaelX17/AppImage-Hub/issues</url>
   <url type="vcs-browser">https://github.com/MichaelX17/AppImage-Hub</url>
   <releases>
-    <release version="0.1.0" date="2026-11-15"/>
+    <release version="0.2.0" date="2026-11-19"/>
   </releases>
   <content_rating type="oars-1.1"/>
 </component>

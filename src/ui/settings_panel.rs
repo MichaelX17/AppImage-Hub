@@ -29,7 +29,7 @@ impl Default for SettingsFormState {
 
 pub fn render(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-        mgr.show_settings = false;
+        mgr.close_settings();
         return;
     }
 
@@ -72,7 +72,7 @@ pub fn render(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
             .add_sized([button_width, 34.0], theme::ghost_button("Cancel"))
             .clicked()
         {
-            mgr.show_settings = false;
+            mgr.close_settings();
         }
     });
 }
@@ -183,7 +183,9 @@ fn render_settings_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
     );
     ui.label(
         theme::muted_label(
-            "The token is encrypted at rest with AES-256-GCM and is never written to config.toml.",
+            "Stored in the system keyring when available; otherwise encrypted with \
+             Argon2id in a 0600 file under your config folder. Never written to \
+             config.toml or beside a portable AppImage.",
         )
         .size(11.0),
     );

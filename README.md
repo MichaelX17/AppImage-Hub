@@ -69,7 +69,7 @@ cargo build --release
 The generated AppImage is written to:
 
 ```text
-dist/AppImage-Hub-0.1.0-x86_64.AppImage
+dist/AppImage-Hub-0.2.0-x86_64.AppImage
 ```
 
 The build script prepares an `AppDir`, installs the desktop entry, icon, AppStream metadata, and custom AppImage Hub metadata, then packages everything with `appimagetool`.
@@ -128,18 +128,48 @@ The sidecar includes fields such as:
 ## Data Locations
 
 - **Config:** `$XDG_CONFIG_HOME/appimage-manager/config.toml` (default: `~/.config/appimage-manager/config.toml`)
+- **GitHub token:** the OS keyring when available; otherwise `$XDG_CONFIG_HOME/appimage-manager/github_token.enc` (Argon2id-encrypted, mode `0600`). This path is used in portable mode too.
 - **Default managed apps:** `$XDG_DATA_HOME/appimage-manager/apps/` (default: `~/.local/share/appimage-manager/apps/`)
 - **Custom storage:** selected through the first-run setup or **Browse** in the toolbar
 - **App metadata:** `<name>.json` in the same folder as the AppImage
 - **Window state:** `~/.config/appimage-manager/window_state.json`
 - **Desktop entries:** `$XDG_DESKTOP_DIR` and `$XDG_DATA_HOME/applications/`
 
+## Security Notes
+
+- The optional GitHub token is stored in the OS keyring (Secret Service on KDE/GNOME). If no keyring is available, AppImage Hub falls back to an Argon2id-encrypted file (`github_token.enc`, mode `0600`) in the XDG config directory. The token is never written to `config.toml`.
+- Portable mode keeps `config.toml` beside the AppImage but **never** stores the token there. If an older portable build left an `AppImageHub.config/github_token.enc` beside your AppImage, AppImage Hub warns at startup: treat that token as compromised, rotate it on GitHub, then delete the file.
+- Tokens saved by versions before this hardening used an unsalted key derivation. They are migrated to the Argon2id format on first load; if decryption fails the old file is preserved so it can be recovered or removed manually.
+- AppImage Hub never deletes a file it did not create: deletion removes the managed binary, sidecar, and in-folder icon, keeps the per-app folder when it contains unrelated files, and refuses paths outside the managed storage roots.
+- Changing the storage folder never moves or deletes existing AppImages; they stay in the previous folder and new downloads use the new folder. The app asks for confirmation first.
+- Config and sidecar writes are atomic. A corrupt `config.toml` is preserved as `config.toml.corrupt-<timestamp>` and reported in the UI instead of being replaced with defaults.
+
+## License
+
+AppImage Hub is dual-licensed under **MIT OR Apache-2.0**. See
+[LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE). AppStream
+metadata in `packaging/` remains CC0-1.0, as declared by its
+`metadata_license`.
+
 ## Architecture
 
 | Module | Purpose |
 | --- | --- |
 | `src/main.rs` | eframe entry point and native window setup |
-| `src/app.rs` | Core state (`ManagerApp`), commands/events, update checks, storage scanning |
+| `src/app.rs` | `ManagerApp` state, types, and eframe orchestration entry points |
+| `src/app/actions.rs` | User intents: add/edit/delete, settings, shortcuts, update actions |
+| `src/app/events.rs` | Backend event handling and state transitions |
+| `src/app/snapshot.rs` | Cached app view and the background file scanner |
+| `src/app/render.rs`, `src/app/toolbar.rs`, `src/app/first_run.rs` | Window rendering, toolbar/Actions menu, first-run setup |
+| `src/backend.rs` | Backend command loop, task registry, and shared job claims |
+| `src/backend/download.rs` | One download → verify → chmod → replace → fingerprint pipeline |
+| `src/backend/install.rs` | GitHub release install pipeline |
+| `src/backend/update_check.rs` | Release cache, local fingerprint checks, commit comparison |
+| `src/backend/self_update.rs` | AppImage Hub self-update transfer |
+| `src/scan.rs` | Local-file issue checks shared by the scanner and update checks |
+| `src/storage.rs` | Storage roots, containment, safe deletion |
+| `src/args.rs` | Launch-argument tokenizer (`split_args`/`join_args`) |
+| `src/fsutil.rs` | Atomic writes, quarantine, directory fsync helpers |
 | `src/config.rs` | Configuration persistence and app entries |
 | `src/appmeta.rs` | Per-AppImage JSON sidecar read/write and schema |
 | `src/appimage.rs` | AppImage metadata and icon extraction from embedded `.desktop` data |
@@ -164,9 +194,14 @@ cargo fmt
 # Lint
 cargo clippy --all-targets --all-features
 
-# Tests
-cargo test
+# Tests (unit + integration)
+cargo test --all-targets
+
+# Dependency/license/advisory audit
+cargo deny check
 ```
+
+The crate's MSRV is Rust 1.88 (see `rust-version` in `Cargo.toml`).
 
 ## Packaging Files
 

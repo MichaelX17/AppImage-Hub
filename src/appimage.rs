@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct AppImageMetadata {
@@ -58,7 +59,7 @@ pub fn icon_cache_dir() -> Result<PathBuf> {
         .unwrap_or_else(std::env::temp_dir)
         .join("appimage-manager")
         .join("icons");
-    fs::create_dir_all(&dir).context("failed to create icon cache directory")?;
+    crate::fsutil::ensure_private_dir(&dir).context("failed to create icon cache directory")?;
     Ok(dir)
 }
 
@@ -179,143 +180,201 @@ pub fn map_kde_category(categories_str: &str) -> (String, bool) {
     }
 }
 
+/// How an AppImage's metadata may be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtractionPolicy {
+    /// The user explicitly selected this file and approved running it once.
+    ExecuteAllowed,
+    /// Never execute the AppImage payload; use non-executing tools only.
+    NeverExecute,
+}
+
+impl ExtractionPolicy {
+    fn executes(self) -> bool {
+        matches!(self, Self::ExecuteAllowed)
+    }
+}
+
+/// Bound for one extraction helper command.
+const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(15);
+/// Upper bound on the number of files considered in an extracted directory.
+const MAX_EXTRACTED_ENTRIES: usize = 64;
+
 struct TempDirGuard<'a>(&'a Path);
-impl<'a> Drop for TempDirGuard<'a> {
+impl Drop for TempDirGuard<'_> {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(self.0);
     }
 }
 
-/// Extracts metadata and icon from an AppImage.
-/// If `dest_icon_dir` is provided, the icon is placed directly in `dest_icon_dir/icon.<ext>`.
-/// Otherwise, it is placed in the icon cache directory.
-pub fn extract_metadata(
+/// Runs a helper command with null stdio and a hard timeout. Returns `true`
+/// when the process finished before the deadline (its exit status is ignored;
+/// callers inspect the extracted files). A hung process is killed.
+fn run_command_bounded(command: &mut Command, timeout: Duration) -> bool {
+    command.stdout(Stdio::null()).stderr(Stdio::null());
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+fn run_appimage_extract(appimage_path: &Path, args: &[&str], cwd: &Path) -> bool {
+    let mut command = Command::new(appimage_path);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env("APPIMAGE_SILENT_INSTALL", "1")
+        .env("DESKTOPINTEGRATION", "no");
+    run_command_bounded(&mut command, EXTRACTION_TIMEOUT)
+}
+
+/// Extracts the interesting files with `7z`, which never executes the AppImage.
+fn extract_with_7z(appimage_path: &Path, out_dir: &Path) -> bool {
+    let mut command = Command::new("7z");
+    command
+        .args(["e", "-y"])
+        .arg(format!("-o{}", out_dir.display()))
+        .arg(appimage_path)
+        .args([".DirIcon", "*.desktop", "*.png", "*.svg"])
+        .current_dir(out_dir);
+    run_command_bounded(&mut command, EXTRACTION_TIMEOUT)
+}
+
+fn read_first_desktop(dir: &Path) -> Option<DesktopFileMetadata> {
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries.flatten().take(MAX_EXTRACTED_ENTRIES) {
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "desktop")
+        {
+            if let Ok(content) = fs::read_to_string(&path) {
+                return Some(parse_desktop_entry(&content));
+            }
+        }
+    }
+    None
+}
+
+fn icon_cache_name(appimage_path: &Path, extension: &str) -> String {
+    use ring::digest::{Context, SHA256};
+    use std::fmt::Write as _;
+
+    let mut context = Context::new(&SHA256);
+    context.update(appimage_path.to_string_lossy().as_bytes());
+    let digest = context.finish();
+    let mut name = String::with_capacity(20);
+    for byte in &digest.as_ref()[..8] {
+        let _ = write!(name, "{byte:02x}");
+    }
+    name.push('.');
+    name.push_str(extension);
+    name
+}
+
+/// Extracts metadata and an icon from an AppImage.
+///
+/// Non-executing extraction (`7z`) is always attempted first. The AppImage
+/// itself is only run (`--appimage-extract`) when the caller explicitly allows
+/// it — never for a freshly downloaded file or during startup repair.
+pub fn extract_metadata_with_policy(
     appimage_path: &Path,
     dest_icon_dir: Option<&Path>,
+    policy: ExtractionPolicy,
 ) -> Result<AppImageMetadata> {
     if !appimage_path.exists() {
         anyhow::bail!("AppImage does not exist: {}", appimage_path.display());
     }
 
-    // Ensure executable permission so runtime can run --appimage-extract
-    let _ = crate::permissions::set_executable(appimage_path);
-
     let temp_base = std::env::temp_dir().join(format!("aim_extract_{}", uuid::Uuid::new_v4()));
-    fs::create_dir_all(&temp_base).context("failed to create temporary extraction directory")?;
+    crate::fsutil::ensure_private_dir(&temp_base)
+        .context("failed to create temporary extraction directory")?;
     let _guard = TempDirGuard(&temp_base);
 
-    let squashfs_root = temp_base.join("squashfs-root");
+    let mut desktop_meta: Option<DesktopFileMetadata> = None;
+    let mut icon_data: Option<(Vec<u8>, &'static str)> = None;
 
-    // Primary strategy: execute AppImage with --appimage-extract
-    let _ = Command::new(appimage_path)
-        .args(["--appimage-extract", ".DirIcon"])
-        .current_dir(&temp_base)
-        .env("APPIMAGE_SILENT_INSTALL", "1")
-        .env("DESKTOPINTEGRATION", "no")
-        .output();
-
-    let _ = Command::new(appimage_path)
-        .args(["--appimage-extract", "*.desktop"])
-        .current_dir(&temp_base)
-        .env("APPIMAGE_SILENT_INSTALL", "1")
-        .env("DESKTOPINTEGRATION", "no")
-        .output();
-
-    // Check if .DirIcon is a symlink pointing to an unextracted file
-    let dir_icon = squashfs_root.join(".DirIcon");
-    if dir_icon.is_symlink() {
-        if let Ok(link_target) = fs::read_link(&dir_icon) {
-            let target_str = link_target.to_string_lossy();
-            let stripped = target_str.trim_start_matches('/');
-            let resolved = squashfs_root.join(stripped);
-            if !resolved.exists() {
-                let _ = Command::new(appimage_path)
-                    .args(["--appimage-extract", stripped])
-                    .current_dir(&temp_base)
-                    .env("APPIMAGE_SILENT_INSTALL", "1")
-                    .env("DESKTOPINTEGRATION", "no")
-                    .output();
-            }
-        }
+    // Strategy 1: non-executing extraction. Works for most AppImages.
+    let seven_dir = temp_base.join("7z_out");
+    if fs::create_dir_all(&seven_dir).is_ok() && extract_with_7z(appimage_path, &seven_dir) {
+        desktop_meta = read_first_desktop(&seven_dir);
+        icon_data = resolve_icon_from_root(&seven_dir);
     }
 
-    // Parse desktop file if extracted
-    let mut desktop_meta: Option<DesktopFileMetadata> = None;
-    if let Ok(entries) = fs::read_dir(&squashfs_root) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.extension().map(|e| e == "desktop").unwrap_or(false) {
-                if let Ok(content) = fs::read_to_string(&p) {
-                    desktop_meta = Some(parse_desktop_entry(&content));
-                    break;
+    // Strategy 2: execute the payload — only with explicit approval.
+    if policy.executes() && (desktop_meta.is_none() || icon_data.is_none()) {
+        let _ = crate::permissions::set_executable(appimage_path);
+        let squashfs_root = temp_base.join("squashfs-root");
+
+        run_appimage_extract(
+            appimage_path,
+            &["--appimage-extract", ".DirIcon"],
+            &temp_base,
+        );
+        run_appimage_extract(
+            appimage_path,
+            &["--appimage-extract", "*.desktop"],
+            &temp_base,
+        );
+
+        // .DirIcon may be a symlink to a file that was not extracted yet.
+        let dir_icon = squashfs_root.join(".DirIcon");
+        if dir_icon.is_symlink() {
+            if let Ok(link_target) = fs::read_link(&dir_icon) {
+                let stripped = link_target
+                    .to_string_lossy()
+                    .trim_start_matches('/')
+                    .to_string();
+                let resolved = squashfs_root.join(&stripped);
+                if !resolved.exists() && !stripped.is_empty() {
+                    run_appimage_extract(
+                        appimage_path,
+                        &["--appimage-extract", &stripped],
+                        &temp_base,
+                    );
                 }
             }
         }
-    }
 
-    // If icon is still missing, try extracting the icon named in the desktop file
-    let mut icon_data: Option<(Vec<u8>, &'static str)> = resolve_icon_from_root(&squashfs_root);
-
-    if icon_data.is_none() {
-        if let Some(ref d_meta) = desktop_meta {
-            if let Some(ref icon_name) = d_meta.icon {
-                let _ = Command::new(appimage_path)
-                    .args(["--appimage-extract", &format!("{icon_name}.*")])
-                    .current_dir(&temp_base)
-                    .env("APPIMAGE_SILENT_INSTALL", "1")
-                    .env("DESKTOPINTEGRATION", "no")
-                    .output();
+        if desktop_meta.is_none() {
+            desktop_meta = read_first_desktop(&squashfs_root);
+        }
+        if icon_data.is_none() {
+            icon_data = resolve_icon_from_root(&squashfs_root);
+        }
+        if icon_data.is_none() {
+            if let Some(icon_name) = desktop_meta.as_ref().and_then(|meta| meta.icon.as_deref()) {
+                let pattern = format!("{icon_name}.*");
+                run_appimage_extract(appimage_path, &["--appimage-extract", &pattern], &temp_base);
                 icon_data = resolve_icon_from_root(&squashfs_root);
             }
         }
     }
 
-    // Secondary fallback: 7z extraction if --appimage-extract did not produce an icon
-    if icon_data.is_none() {
-        let out_7z = temp_base.join("7z_out");
-        let _ = fs::create_dir_all(&out_7z);
-        let _ = Command::new("7z")
-            .args([
-                "e",
-                "-y",
-                &format!("-o{}", out_7z.display()),
-                appimage_path.to_str().unwrap_or(""),
-                ".DirIcon",
-                "*.desktop",
-                "*.png",
-                "*.svg",
-            ])
-            .output();
-
-        if desktop_meta.is_none() {
-            if let Ok(entries) = fs::read_dir(&out_7z) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    if p.extension().map(|e| e == "desktop").unwrap_or(false) {
-                        if let Ok(content) = fs::read_to_string(&p) {
-                            desktop_meta = Some(parse_desktop_entry(&content));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        icon_data = resolve_icon_from_root(&out_7z);
-    }
-
-    // Save icon if found
-    let saved_icon_path = if let Some((bytes, ext)) = icon_data {
-        let target_path = if let Some(dir) = dest_icon_dir {
-            fs::create_dir_all(dir)?;
-            dir.join(format!("icon.{}", ext))
+    let saved_icon_path = if let Some((bytes, extension)) = icon_data {
+        let target_path = if let Some(dest_dir) = dest_icon_dir {
+            fs::create_dir_all(dest_dir)?;
+            dest_dir.join(format!("icon.{extension}"))
         } else {
-            let cache = icon_cache_dir()?;
-            let stem = appimage_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("app");
-            cache.join(format!("{}.{}", crate::xdg::sanitize_name(stem), ext))
+            icon_cache_dir()?.join(icon_cache_name(appimage_path, extension))
         };
         fs::write(&target_path, bytes)?;
         Some(target_path)
@@ -325,34 +384,52 @@ pub fn extract_metadata(
 
     let (matched_category, is_custom_category) = desktop_meta
         .as_ref()
-        .and_then(|d| d.categories.as_deref())
+        .and_then(|desktop| desktop.categories.as_deref())
         .map(map_kde_category)
-        .map(|(cat, custom)| (Some(cat), custom))
+        .map(|(category, custom)| (Some(category), custom))
         .unwrap_or((None, false));
 
-    let mime_types = desktop_meta.as_ref().and_then(|d| d.mime_types.clone());
+    let mime_types = desktop_meta
+        .as_ref()
+        .and_then(|desktop| desktop.mime_types.clone());
     let exec_arg = exec_placeholder(
-        desktop_meta.as_ref().and_then(|d| d.exec.as_deref()),
+        desktop_meta
+            .as_ref()
+            .and_then(|desktop| desktop.exec.as_deref()),
         mime_types.as_deref(),
     );
 
     Ok(AppImageMetadata {
-        name: desktop_meta.as_ref().and_then(|d| d.name.clone()),
-        generic_name: desktop_meta.as_ref().and_then(|d| d.generic_name.clone()),
-        comment: desktop_meta.as_ref().and_then(|d| d.comment.clone()),
-        categories: desktop_meta.as_ref().and_then(|d| d.categories.clone()),
+        name: desktop_meta
+            .as_ref()
+            .and_then(|desktop| desktop.name.clone()),
+        generic_name: desktop_meta
+            .as_ref()
+            .and_then(|desktop| desktop.generic_name.clone()),
+        comment: desktop_meta
+            .as_ref()
+            .and_then(|desktop| desktop.comment.clone()),
+        categories: desktop_meta
+            .as_ref()
+            .and_then(|desktop| desktop.categories.clone()),
         matched_category,
         is_custom_category,
-        startup_notify: desktop_meta.as_ref().and_then(|d| d.startup_notify),
+        startup_notify: desktop_meta
+            .as_ref()
+            .and_then(|desktop| desktop.startup_notify),
         icon_path: saved_icon_path,
         mime_types,
         exec_arg,
     })
 }
 
-/// Helper to extract just the icon from an AppImage and save it to `dest_icon_dir/icon.<ext>`.
-pub fn extract_icon(appimage_path: &Path, dest_icon_dir: &Path) -> Result<PathBuf> {
-    let meta = extract_metadata(appimage_path, Some(dest_icon_dir))?;
+/// Extracts just the icon from an AppImage into `dest_icon_dir/icon.<ext>`.
+pub fn extract_icon_with_policy(
+    appimage_path: &Path,
+    dest_icon_dir: &Path,
+    policy: ExtractionPolicy,
+) -> Result<PathBuf> {
+    let meta = extract_metadata_with_policy(appimage_path, Some(dest_icon_dir), policy)?;
     meta.icon_path
         .context("no icon found or extracted from AppImage")
 }
@@ -377,7 +454,7 @@ fn resolve_icon_from_root(dir: &Path) -> Option<(Vec<u8>, &'static str)> {
     // 2. Check root directory for any .png or .svg
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
+        for entry in entries.flatten().take(MAX_EXTRACTED_ENTRIES) {
             let p = entry.path();
             if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
                 let ext_lower = ext.to_lowercase();
@@ -479,5 +556,53 @@ MimeType=x-scheme-handler/heroic;application/x-iso9660-image;
             ("UnknownCategory".into(), true)
         );
         assert_eq!(map_kde_category(""), ("Utility".into(), false));
+    }
+
+    #[test]
+    fn extraction_timeout_kills_child() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 5"]);
+        let started = Instant::now();
+        let finished = run_command_bounded(&mut command, Duration::from_millis(100));
+        assert!(!finished, "sleep must hit the timeout");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the hung child must be killed promptly"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn downloaded_app_requires_confirmation_before_exec() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!("aim-extract-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("executed");
+        let script = dir.join("app.AppImage");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\necho ran > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Downloaded files are inspected with non-executing extraction only.
+        let meta = extract_metadata_with_policy(&script, None, ExtractionPolicy::NeverExecute)
+            .expect("non-executing extraction should not error out");
+        assert!(meta.icon_path.is_none());
+        assert!(
+            !marker.exists(),
+            "NeverExecute must never run the AppImage payload"
+        );
+
+        // An explicitly approved local file may be run once.
+        let _ = extract_metadata_with_policy(&script, None, ExtractionPolicy::ExecuteAllowed);
+        assert!(
+            marker.exists(),
+            "ExecuteAllowed may run the payload to read metadata"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

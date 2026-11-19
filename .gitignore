@@ -1,9 +1,16 @@
 # Ignore everything except the files needed for the project source.
 /*
 !/.gitignore
+!/.github/
 !/assets/
 !/packaging/
 !/src/
+!/tests/
 !/Cargo.lock
 !/Cargo.toml
+!/build.rs
 !/README.md
+!/CHANGELOG.md
+!/LICENSE-MIT
+!/LICENSE-APACHE
+!/deny.toml

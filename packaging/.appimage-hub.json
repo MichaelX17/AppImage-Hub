@@ -11,7 +11,7 @@
     "type": "github_only",
     "github_repo": "https://github.com/MichaelX17/AppImage-Hub"
   },
-  "current_version": "0.1.0",
+  "current_version": "0.2.0",
   "asset_preference": "AppImage-Hub-x86_64.AppImage",
   "file": "AppImage-Hub-x86_64.AppImage",
   "icon": "appimage-hub.png"

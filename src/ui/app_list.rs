@@ -7,11 +7,12 @@
 //! All backend interactions are funneled through [`CardActions`] so the card is
 //! rendered first and `ManagerApp` is mutated afterwards (no borrow conflicts).
 
-use crate::app::{AppDownloadState, AppSortBy, BackendCommand, LocalFileIssue, ManagerApp};
+use crate::app::{AppDownloadState, AppSortBy, CachedAppMeta, LocalFileIssue, ManagerApp};
 use crate::config::{AppEntry, AppSource};
 use crate::ui::breakpoints::SizeClass;
 use crate::ui::theme::{self, BadgeKind};
 use eframe::egui::{self, Align, Layout, RichText, Sense, Stroke};
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CardState {
@@ -50,7 +51,13 @@ fn card_layout_params(ui_width: f32) -> CardLayout {
     }
 }
 
-pub fn render(ui: &mut egui::Ui, apps: &[AppEntry], mgr: &mut ManagerApp, size_class: SizeClass) {
+pub(crate) fn render(
+    ui: &mut egui::Ui,
+    apps: &[AppEntry],
+    meta: &HashMap<String, CachedAppMeta>,
+    mgr: &mut ManagerApp,
+    size_class: SizeClass,
+) {
     let _ = size_class;
     if apps.is_empty() {
         render_empty_state(ui, mgr);
@@ -58,7 +65,7 @@ pub fn render(ui: &mut egui::Ui, apps: &[AppEntry], mgr: &mut ManagerApp, size_c
     }
 
     let mut sorted_apps: Vec<&AppEntry> = apps.iter().collect();
-    sort_apps(&mut sorted_apps, mgr.sort_by);
+    sort_apps(&mut sorted_apps, meta, mgr.sort_by);
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -73,18 +80,18 @@ pub fn render(ui: &mut egui::Ui, apps: &[AppEntry], mgr: &mut ManagerApp, size_c
         });
 }
 
-fn sort_apps(apps: &mut [&AppEntry], sort_by: AppSortBy) {
+fn sort_apps(apps: &mut [&AppEntry], meta: &HashMap<String, CachedAppMeta>, sort_by: AppSortBy) {
     match sort_by {
         AppSortBy::Name => apps.sort_by_cached_key(|app| app.display_name.to_lowercase()),
         AppSortBy::Size => apps.sort_by_cached_key(|app| {
             (
-                std::cmp::Reverse(app_size(app)),
+                std::cmp::Reverse(app_size(app, meta)),
                 app.display_name.to_lowercase(),
             )
         }),
         AppSortBy::DateAdded => apps.sort_by_cached_key(|app| {
             (
-                std::cmp::Reverse(app_added_at(app)),
+                std::cmp::Reverse(app_added_at(app, meta)),
                 app.display_name.to_lowercase(),
             )
         }),
@@ -100,14 +107,22 @@ fn sort_apps(apps: &mut [&AppEntry], sort_by: AppSortBy) {
     }
 }
 
-fn app_size(app: &AppEntry) -> u64 {
-    app.local_path
-        .metadata()
-        .map(|meta| meta.len())
-        .unwrap_or(0)
+fn app_size(app: &AppEntry, meta: &HashMap<String, CachedAppMeta>) -> u64 {
+    meta.get(&app.id)
+        .map(|cached| cached.size)
+        .unwrap_or_else(|| {
+            app.local_path
+                .metadata()
+                .map(|metadata| metadata.len())
+                .unwrap_or(0)
+        })
 }
 
-fn app_added_at(app: &AppEntry) -> i64 {
+fn app_added_at(app: &AppEntry, meta: &HashMap<String, CachedAppMeta>) -> i64 {
+    if let Some(cached) = meta.get(&app.id) {
+        return cached.added_at;
+    }
+
     app.added_at.unwrap_or_else(|| {
         app.local_path
             .metadata()
@@ -351,16 +366,20 @@ fn render_app_card(ui: &mut egui::Ui, mgr: &mut ManagerApp, app: &AppEntry) {
         mgr.accept_current_file(&app.id);
     }
     if actions.launch {
-        mgr.send_cmd(BackendCommand::Launch {
-            app_id: app.id.clone(),
-        });
+        mgr.launch_app(&app.id);
     }
     if actions.edit {
         mgr.open_edit(app);
     }
     if actions.update {
         if let Some(update) = update_info {
-            mgr.start_update_download(app.id.clone(), update.url, update.tag, update.commit_hash);
+            mgr.start_update_download(
+                app.id.clone(),
+                update.url.clone(),
+                update.tag.clone(),
+                update.commit_hash.clone(),
+                update.checksum_url.clone(),
+            );
         }
     }
     if actions.add_to {
@@ -719,6 +738,7 @@ fn render_icon(ui: &mut egui::Ui, app: &AppEntry, size: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_card_layout_responsiveness() {
@@ -785,7 +805,7 @@ mod tests {
         let alpha = sample_app("1", "alpha", AppSource::LocalOnly, None);
         let beta = sample_app("2", "Beta", AppSource::LocalOnly, None);
         let mut apps = vec![&beta, &alpha];
-        sort_apps(&mut apps, AppSortBy::Name);
+        sort_apps(&mut apps, &HashMap::new(), AppSortBy::Name);
         assert_eq!(
             apps.iter()
                 .map(|app| app.display_name.as_str())
@@ -795,11 +815,38 @@ mod tests {
     }
 
     #[test]
+    fn sort_uses_cached_size() {
+        let small = sample_app("small", "Small", AppSource::LocalOnly, None);
+        let big = sample_app("big", "Big", AppSource::LocalOnly, None);
+        let mut meta = HashMap::new();
+        meta.insert(
+            big.id.clone(),
+            CachedAppMeta {
+                size: 900,
+                added_at: 0,
+            },
+        );
+        meta.insert(
+            small.id.clone(),
+            CachedAppMeta {
+                size: 1,
+                added_at: 0,
+            },
+        );
+
+        let mut apps = vec![&small, &big];
+        sort_apps(&mut apps, &meta, AppSortBy::Size);
+
+        assert_eq!(apps[0].id, "big");
+        assert_eq!(apps[1].id, "small");
+    }
+
+    #[test]
     fn sort_by_date_added_uses_newest_first() {
         let old = sample_app("1", "Old", AppSource::LocalOnly, Some(100));
         let new = sample_app("2", "New", AppSource::LocalOnly, Some(200));
         let mut apps = vec![&old, &new];
-        sort_apps(&mut apps, AppSortBy::DateAdded);
+        sort_apps(&mut apps, &HashMap::new(), AppSortBy::DateAdded);
         assert_eq!(apps[0].display_name, "New");
         assert_eq!(apps[1].display_name, "Old");
     }
@@ -817,11 +864,11 @@ mod tests {
         );
 
         let mut apps = vec![&local, &github];
-        sort_apps(&mut apps, AppSortBy::Github);
+        sort_apps(&mut apps, &HashMap::new(), AppSortBy::Github);
         assert_eq!(apps[0].display_name, "GitHub");
 
         let mut apps = vec![&github, &local];
-        sort_apps(&mut apps, AppSortBy::Local);
+        sort_apps(&mut apps, &HashMap::new(), AppSortBy::Local);
         assert_eq!(apps[0].display_name, "Local");
     }
 }

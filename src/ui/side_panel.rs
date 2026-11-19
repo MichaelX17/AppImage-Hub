@@ -115,6 +115,10 @@ pub struct SidePanelFormState {
     pub local_path: String,
     pub icon_path: String,
     pub github_url: String,
+    /// Display buffer for launch arguments — not the source of truth. The
+    /// stored value is the `Vec<String>` in `AppEntry.args`; `args::split_args`
+    /// parses this buffer when the form is submitted and `args::join_args`
+    /// renders it when editing.
     pub launch_args: String,
     pub asset_selection_mode: AssetSelectionMode,
     pub manual_asset: Option<String>,
@@ -302,22 +306,8 @@ pub fn render_add_to(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeC
         ui.label(theme::section_heading("Targets"));
         ui.add_space(theme::SPACE_SM);
 
-        let desktop_path = crate::xdg::desktop_dir().ok().and_then(|d| {
-            mgr.config.lock().ok().and_then(|c| {
-                c.applications
-                    .iter()
-                    .find(|a| a.id == state.app_id)
-                    .map(|app| crate::desktop_entry::desktop_shortcut_path(app, &d))
-            })
-        });
-        let menu_path = crate::xdg::applications_dir().ok().and_then(|a_dir| {
-            mgr.config.lock().ok().and_then(|c| {
-                c.applications
-                    .iter()
-                    .find(|a| a.id == state.app_id)
-                    .map(|app| crate::desktop_entry::menu_entry_path(app, &a_dir))
-            })
-        });
+        let desktop_path = state.desktop_path.clone();
+        let menu_path = state.menu_path.clone();
 
         if let Some(p) = &desktop_path {
             shortcut_target(ui, "Desktop shortcut", p);
@@ -633,6 +623,12 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
             ui.label(
                 theme::muted_label("Select the local .AppImage to import or track.").size(11.0),
             );
+            ui.label(
+                theme::muted_label(
+                    "A local file may be run once (--appimage-extract) to read its metadata.",
+                )
+                .size(11.0),
+            );
         }
         required_hint(
             ui,
@@ -643,6 +639,13 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
     } else {
         ui.label(
             theme::muted_label("AppImage will be downloaded and managed after install.").size(11.0),
+        );
+        ui.label(
+            theme::muted_label(
+                "Downloaded AppImages are not executed for metadata; if no non-executing \
+                 extractor is available, fill these fields manually.",
+            )
+            .size(11.0),
         );
         ui.add_space(theme::SPACE_MD);
     }
@@ -816,6 +819,12 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
         ui.label(
             theme::muted_label("Optional arguments passed to the AppImage at launch.").size(11.0),
         );
+        ui.label(
+            theme::muted_label(
+                "Use quotes for arguments with spaces, e.g. --profile=\"My Profile\".",
+            )
+            .size(11.0),
+        );
         ui.add_space(theme::SPACE_XS);
         form_text_input(
             ui,
@@ -900,6 +909,9 @@ fn validation_message(form: &SidePanelFormState) -> Option<&'static str> {
     if form.display_name.trim().is_empty() {
         return Some("Display Name is required.");
     }
+    if crate::args::split_args(&form.launch_args).is_err() {
+        return Some("Unterminated quote or escape in launch arguments.");
+    }
     match form.mode {
         SidePanelMode::LocalOnly => {
             if form.local_path.trim().is_empty() {
@@ -962,6 +974,24 @@ mod tests {
         );
 
         form.local_path = "/tmp/my.AppImage".into();
+        assert_eq!(validation_message(&form), None);
+    }
+
+    #[test]
+    fn test_validation_rejects_unterminated_launch_arg_quote() {
+        let mut form = SidePanelFormState {
+            display_name: "MyApp".into(),
+            mode: SidePanelMode::LocalOnly,
+            local_path: "/tmp/my.AppImage".into(),
+            launch_args: "a \"b c".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            validation_message(&form),
+            Some("Unterminated quote or escape in launch arguments.")
+        );
+
+        form.launch_args = "a \"b c\"".into();
         assert_eq!(validation_message(&form), None);
     }
 
