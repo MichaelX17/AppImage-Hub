@@ -1,6 +1,6 @@
 [package]
-name = "appimage-manager"
-version = "0.1.0"
+name = "appimage-hub"
+version = "0.1.1"
 edition = "2021"
 
 [dependencies]
@@ -32,6 +32,7 @@ rfd = "0.15"
 
 # Errors & logging
 anyhow = "1"
+ring = "0.17"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = "0.3"

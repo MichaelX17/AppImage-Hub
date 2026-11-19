@@ -13,6 +13,8 @@ pub struct AppImageMetadata {
     pub is_custom_category: bool,
     pub startup_notify: Option<bool>,
     pub icon_path: Option<PathBuf>,
+    pub mime_types: Option<String>,
+    pub exec_arg: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -23,6 +25,8 @@ pub struct DesktopFileMetadata {
     pub categories: Option<String>,
     pub startup_notify: Option<bool>,
     pub icon: Option<String>,
+    pub mime_types: Option<String>,
+    pub exec: Option<String>,
 }
 
 /// Detects the image file format extension from raw bytes.
@@ -108,12 +112,33 @@ pub fn parse_desktop_entry(content: &str) -> DesktopFileMetadata {
                     }
                 }
                 "Icon" if meta.icon.is_none() => meta.icon = Some(val.to_string()),
+                "MimeType" if meta.mime_types.is_none() => {
+                    meta.mime_types = Some(val.to_string());
+                }
+                "Exec" if meta.exec.is_none() => meta.exec = Some(val.to_string()),
                 _ => {}
             }
         }
     }
 
     meta
+}
+
+fn exec_placeholder(exec: Option<&str>, mime_types: Option<&str>) -> Option<String> {
+    let exec = exec.unwrap_or_default();
+    for placeholder in ["%U", "%u", "%F", "%f"] {
+        if exec.contains(placeholder) {
+            return Some(placeholder.to_string());
+        }
+    }
+    if mime_types
+        .unwrap_or_default()
+        .split(';')
+        .any(|mime| mime.trim().starts_with("x-scheme-handler/"))
+    {
+        return Some("%U".to_string());
+    }
+    None
 }
 
 /// Maps standard XDG desktop categories to the KDE Plasma categories used by AppImage Hub.
@@ -305,6 +330,12 @@ pub fn extract_metadata(
         .map(|(cat, custom)| (Some(cat), custom))
         .unwrap_or((None, false));
 
+    let mime_types = desktop_meta.as_ref().and_then(|d| d.mime_types.clone());
+    let exec_arg = exec_placeholder(
+        desktop_meta.as_ref().and_then(|d| d.exec.as_deref()),
+        mime_types.as_deref(),
+    );
+
     Ok(AppImageMetadata {
         name: desktop_meta.as_ref().and_then(|d| d.name.clone()),
         generic_name: desktop_meta.as_ref().and_then(|d| d.generic_name.clone()),
@@ -314,6 +345,8 @@ pub fn extract_metadata(
         is_custom_category,
         startup_notify: desktop_meta.as_ref().and_then(|d| d.startup_notify),
         icon_path: saved_icon_path,
+        mime_types,
+        exec_arg,
     })
 }
 
@@ -385,6 +418,7 @@ Exec=pcsx2 %F
 Icon=pcsx2
 Categories=Game;Emulator;
 StartupNotify=true
+MimeType=x-scheme-handler/heroic;application/x-iso9660-image;
 "#;
         let meta = parse_desktop_entry(content);
         assert_eq!(meta.name.as_deref(), Some("PCSX2"));
@@ -396,6 +430,15 @@ StartupNotify=true
         assert_eq!(meta.categories.as_deref(), Some("Game;Emulator;"));
         assert_eq!(meta.startup_notify, Some(true));
         assert_eq!(meta.icon.as_deref(), Some("pcsx2"));
+        assert_eq!(
+            meta.mime_types.as_deref(),
+            Some("x-scheme-handler/heroic;application/x-iso9660-image;")
+        );
+        assert_eq!(meta.exec.as_deref(), Some("pcsx2 %F"));
+        assert_eq!(
+            exec_placeholder(meta.exec.as_deref(), meta.mime_types.as_deref()).as_deref(),
+            Some("%F")
+        );
     }
 
     #[test]

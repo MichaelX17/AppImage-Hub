@@ -18,8 +18,17 @@ DIST_DIR="$ROOT/dist"
 OUTPUT="$DIST_DIR/AppImage-Hub-${VERSION}-${ARCH}.AppImage"
 OUTPUT_TMP="$OUTPUT.tmp"
 
+# Cargo names the binary after the package ("appimage-hub"), not after the
+# executable name used inside the AppImage ("appimage-manager"). Using the
+# latter here silently packaged a stale leftover binary from an older build.
+BIN="$ROOT/target/release/appimage-hub"
+
 echo "==> Building release binary"
-cargo build --release
+cargo build --release --bin appimage-hub
+if [ ! -x "$BIN" ]; then
+  echo "Missing release binary: $BIN" >&2
+  exit 1
+fi
 
 echo "==> Preparing AppDir"
 rm -rf "$APPDIR"
@@ -28,7 +37,7 @@ mkdir -p \
   "$APPDIR/usr/share/icons/hicolor/512x512/apps" \
   "$APPDIR/usr/share/metainfo"
 
-install -m 755 "$ROOT/target/release/appimage-manager" "$APPDIR/usr/bin/appimage-manager"
+install -m 755 "$BIN" "$APPDIR/usr/bin/appimage-manager"
 install -m 644 "$ROOT/assets/logo.png" "$APPDIR/appimage-hub.png"
 install -m 644 "$ROOT/assets/logo.png" "$APPDIR/usr/share/icons/hicolor/512x512/apps/appimage-hub.png"
 install -m 644 "$ROOT/packaging/io.github.michaelx17.AppImageHub.desktop" "$APPDIR/io.github.michaelx17.AppImageHub.desktop"

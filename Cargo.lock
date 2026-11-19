@@ -179,8 +179,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "appimage-manager"
-version = "0.1.0"
+name = "appimage-hub"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async_downloader",
@@ -193,6 +193,7 @@ dependencies = [
  "octocrab",
  "reqwest 0.12.28",
  "rfd",
+ "ring",
  "rustls",
  "serde",
  "serde_json",

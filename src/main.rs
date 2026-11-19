@@ -7,6 +7,7 @@ mod downloader;
 mod github;
 mod launcher;
 mod permissions;
+mod secrets;
 mod ui;
 mod xdg;
 
@@ -24,12 +25,7 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport,
-        persistence_path: Some(
-            dirs::config_dir()
-                .unwrap_or_else(|| std::env::current_dir().unwrap())
-                .join("appimage-manager")
-                .join("window_state.json"),
-        ),
+        persistence_path: Some(config::config_dir().join("window_state.json")),
         ..Default::default()
     };
     eframe::run_native(

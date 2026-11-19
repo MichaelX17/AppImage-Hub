@@ -13,8 +13,10 @@ pub fn ensure_crypto_provider() {
 #[derive(Debug, Clone)]
 pub struct ReleaseInfo {
     pub tag: String,
+    #[allow(dead_code)]
     pub asset_name: String,
     pub download_url: String,
+    pub commit_hash: String,
 }
 
 fn normalize_repo(repo: &str) -> Result<(String, String)> {
@@ -174,6 +176,46 @@ pub async fn fetch_latest_release(client: &Octocrab, repo: &str) -> Result<Relea
     fetch_latest_release_with_selector(client, repo, None).await
 }
 
+fn looks_like_commit_hash(value: &str) -> bool {
+    let value = value.trim();
+    value.len() >= 7 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+async fn resolve_release_commit(
+    client: &Octocrab,
+    owner: &str,
+    repo: &str,
+    tag: &str,
+    target_commitish: &str,
+) -> Result<String> {
+    // Some repositories use a full commit SHA as target_commitish.
+    if looks_like_commit_hash(target_commitish) {
+        return Ok(target_commitish.trim().to_string());
+    }
+
+    // Resolve the release tag to its commit. This is the authoritative path
+    // for static tags such as "latest".
+    if let Ok(commit) = client.commits(owner, repo).get(tag).await {
+        return Ok(commit.sha);
+    }
+
+    // Fall back to target_commitish (usually a branch name) if the tag cannot
+    // be resolved directly.
+    let target = target_commitish.trim();
+    if !target.is_empty() {
+        let commit = client
+            .commits(owner, repo)
+            .get(target)
+            .await
+            .with_context(|| {
+                format!("failed to resolve release commit for {owner}/{repo} at {target}")
+            })?;
+        return Ok(commit.sha);
+    }
+
+    anyhow::bail!("release {tag} has no resolvable commit hash")
+}
+
 pub async fn fetch_latest_release_with_selector(
     client: &Octocrab,
     repo: &str,
@@ -237,10 +279,20 @@ pub async fn fetch_latest_release_with_selector(
             .unwrap()
     };
 
+    let commit_hash = resolve_release_commit(
+        client,
+        &owner,
+        &name,
+        &release.tag_name,
+        &release.target_commitish,
+    )
+    .await?;
+
     Ok(ReleaseInfo {
         tag: release.tag_name.clone(),
         asset_name: asset.name.clone(),
         download_url: asset.browser_download_url.to_string(),
+        commit_hash,
     })
 }
 
@@ -302,6 +354,16 @@ mod tests {
     }
 
     #[test]
+    fn commit_hash_detection_accepts_full_and_short_shas() {
+        assert!(looks_like_commit_hash(
+            "0123456789abcdef0123456789abcdef01234567"
+        ));
+        assert!(looks_like_commit_hash("0123456"));
+        assert!(!looks_like_commit_hash("main"));
+        assert!(!looks_like_commit_hash("latest"));
+    }
+
+    #[test]
     fn test_score_asset_architectures() {
         // On x86_64: x86_64 and amd64 score highest
         let x86_score = score_asset("MyApp-x86_64.AppImage", "x86_64");
@@ -323,6 +385,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires GitHub network access"]
     async fn fetch_latest_release_real_repo() -> Result<()> {
         ensure_crypto_provider();
         let client = Octocrab::builder().build()?;
@@ -337,6 +400,10 @@ mod tests {
             info.download_url.starts_with("http"),
             "download URL should be http(s): {}",
             info.download_url
+        );
+        assert!(
+            !info.commit_hash.is_empty(),
+            "commit hash should not be empty"
         );
         Ok(())
     }

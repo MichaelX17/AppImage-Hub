@@ -53,8 +53,8 @@ pub const SPACE_XL: f32 = 24.0;
 pub const MENU_WIDTH: f32 = 200.0;
 /// Height of a full-width popup menu action.
 pub const MENU_ITEM_HEIGHT: f32 = 36.0;
-/// Total height of the overflow menu (frame padding + 2 items + gap).
-pub const MENU_HEIGHT: f32 = 96.0;
+/// Total height of the overflow menu (frame padding + 3 items + gaps).
+pub const MENU_HEIGHT: f32 = 140.0;
 
 pub fn apply_style(ctx: &egui::Context) {
     let mut visuals = Visuals::dark();
@@ -134,6 +134,10 @@ pub fn apply_style(ctx: &egui::Context) {
     style.spacing.item_spacing = egui::vec2(SPACE_SM, SPACE_SM);
     style.spacing.button_padding = egui::vec2(14.0, 7.0);
     style.spacing.interact_size.y = 32.0;
+    // Larger rounded-square checkbox/radio indicators.
+    style.spacing.icon_width = 20.0;
+    style.spacing.icon_width_inner = 12.0;
+    style.spacing.icon_spacing = 8.0;
     style.spacing.window_margin = Margin::same(SPACE_MD as i8);
     style.spacing.menu_margin = Margin::same(SPACE_SM as i8);
     // Solid scrollbars allocate space beside the content instead of floating
@@ -263,15 +267,15 @@ pub fn menu_frame() -> egui::Frame {
 /// Where to place the card overflow menu so it opens right under the `•••`
 /// button, right-aligned to it, and stays inside the card. If there is not
 /// enough room below the button, it flips above it (still inside the card).
-pub fn menu_popup_pos(button: Rect, card: Rect) -> egui::Pos2 {
+pub fn menu_popup_pos(button: Rect, card: Rect, menu_height: f32) -> egui::Pos2 {
     let width = MENU_WIDTH + 2.0 * SPACE_SM;
     let x = (button.right() - width).max(card.left() + SPACE_XS);
 
     let below = button.bottom() + SPACE_SM;
-    let y = if below + MENU_HEIGHT + SPACE_XS <= card.bottom() {
+    let y = if below + menu_height + SPACE_XS <= card.bottom() {
         below
     } else {
-        (button.top() - MENU_HEIGHT - SPACE_XS).max(card.top() + SPACE_XS)
+        (button.top() - menu_height - SPACE_XS).max(card.top() + SPACE_XS)
     };
 
     egui::pos2(x, y)
@@ -378,68 +382,6 @@ fn badge_colors(kind: BadgeKind) -> (Color32, Color32) {
         BadgeKind::Neutral => (TEXT_SECONDARY, NEUTRAL_SOFT),
     }
 }
-/// Small folder glyph drawn from shapes (no image assets).
-pub fn folder_icon(ui: &mut egui::Ui, size: f32, color: Color32) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
-    if rect.is_finite() && rect.width() > 0.0 && rect.height() > 0.0 {
-        paint_folder(ui.painter(), rect.shrink(size * 0.08), color);
-    }
-    response
-}
-
-pub fn paint_folder(painter: &egui::Painter, rect: Rect, color: Color32) {
-    if !rect.is_finite() || rect.width() <= 1.0 || rect.height() <= 1.0 {
-        return;
-    }
-    let tab = Rect::from_min_size(
-        egui::pos2(rect.left(), rect.top() + rect.height() * 0.16),
-        egui::vec2(rect.width() * 0.46, rect.height() * 0.26),
-    );
-    painter.rect_filled(
-        tab,
-        CornerRadius {
-            nw: 2,
-            ne: 3,
-            sw: 0,
-            se: 0,
-        },
-        color,
-    );
-    let body = Rect::from_min_max(
-        egui::pos2(rect.left(), rect.top() + rect.height() * 0.36),
-        egui::pos2(rect.right(), rect.bottom()),
-    );
-    painter.rect_filled(body, CornerRadius::same(2), color);
-}
-
-/// Folder-icon + path breadcrumb used by the top toolbar.
-pub fn breadcrumb(ui: &mut egui::Ui, path: &str, icon_color: Color32) -> egui::Response {
-    ui.horizontal(|ui| {
-        folder_icon(ui, 14.0, icon_color);
-        ui.add_space(5.0);
-        let display = elide_path(path, 64);
-        ui.label(RichText::new(display).size(12.0).color(TEXT_SECONDARY));
-    })
-    .response
-}
-
-/// Shorten `$HOME/...` to `~/...` and elide the middle of very long paths,
-/// keeping the (most meaningful) tail.
-fn elide_path(path: &str, max_chars: usize) -> String {
-    let home = std::env::var("HOME").ok().filter(|h| !h.is_empty());
-    let shortened = match home {
-        Some(home) if path.starts_with(home.as_str()) => path.replacen(home.as_str(), "~", 1),
-        _ => path.to_string(),
-    };
-    let count = shortened.chars().count();
-    if count <= max_chars || max_chars < 4 {
-        return shortened;
-    }
-    let keep = max_chars - 1;
-    let tail: String = shortened.chars().skip(count - keep).collect();
-    format!("…{tail}")
-}
-
 /// A small inline badge indicating an update is available.
 /// Uses both color and text so it is not color-alone.
 #[allow(dead_code)]

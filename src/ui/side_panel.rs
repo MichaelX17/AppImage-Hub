@@ -107,6 +107,10 @@ pub struct SidePanelFormState {
     /// the selector can remain on its Utility default until the user chooses.
     pub detected_category: Option<String>,
     pub startup_notify: bool,
+    pub desktop_shortcut: bool,
+    pub menu_entry: bool,
+    pub mime_types: String,
+    pub exec_arg: String,
     pub mode: SidePanelMode,
     pub local_path: String,
     pub icon_path: String,
@@ -131,6 +135,10 @@ impl Default for SidePanelFormState {
             category_user_selected: false,
             detected_category: None,
             startup_notify: true,
+            desktop_shortcut: true,
+            menu_entry: true,
+            mime_types: String::new(),
+            exec_arg: String::new(),
             mode: SidePanelMode::default(),
             local_path: String::new(),
             icon_path: String::new(),
@@ -518,6 +526,44 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
     );
     ui.label(
         theme::muted_label("Shows launch animation/busy cursor in Plasma session.").size(11.0),
+    );
+
+    ui.add_space(theme::SPACE_LG);
+    ui.label(theme::section_heading("Shortcuts"));
+    ui.add_space(theme::SPACE_SM);
+    ui.checkbox(
+        &mut mgr.side_panel_form.desktop_shortcut,
+        "Desktop shortcut",
+    );
+    ui.add_space(theme::SPACE_XS);
+    ui.checkbox(&mut mgr.side_panel_form.menu_entry, "Start menu entry");
+    ui.add_space(theme::SPACE_SM);
+    ui.label(theme::field_label("MIME types / URI schemes (optional)"));
+    form_text_input(
+        ui,
+        &mut mgr.side_panel_form.mime_types,
+        "e.g. x-scheme-handler/heroic;application/x-iso9660-image;",
+        width,
+    );
+    ui.label(
+        theme::muted_label(
+            "Detected from the AppImage's internal .desktop file. Separate entries with ';'.",
+        )
+        .size(11.0),
+    );
+    ui.add_space(theme::SPACE_SM);
+    ui.label(theme::field_label("Open argument placeholder (optional)"));
+    form_text_input(
+        ui,
+        &mut mgr.side_panel_form.exec_arg,
+        "e.g. %U, %u, %F, or %f",
+        width,
+    );
+    ui.label(
+        theme::muted_label(
+            "Passed to Exec when opening URLs/files. Detected automatically when possible.",
+        )
+        .size(11.0),
     );
     ui.add_space(theme::SPACE_LG);
     // ── Source section ───────────────────────────────────────────────────

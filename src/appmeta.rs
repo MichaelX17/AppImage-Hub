@@ -57,6 +57,24 @@ pub struct AppMetadataFile {
     /// Unix timestamp for when the app was added.
     #[serde(default)]
     pub added_at: Option<i64>,
+    /// Commit hash of the installed release used for update comparison.
+    #[serde(default)]
+    pub commit_hash: Option<String>,
+    /// Fingerprint of the AppImage file when AppImage Hub last wrote it.
+    #[serde(default)]
+    pub file_fingerprint: Option<crate::config::FileFingerprint>,
+    #[serde(default = "default_true")]
+    pub desktop_shortcut: bool,
+    #[serde(default = "default_true")]
+    pub menu_entry: bool,
+    #[serde(default)]
+    pub mime_types: Option<String>,
+    #[serde(default)]
+    pub exec_arg: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl AppMetadataFile {
@@ -85,6 +103,12 @@ impl AppMetadataFile {
             file,
             icon,
             added_at: entry.added_at,
+            commit_hash: entry.commit_hash.clone(),
+            file_fingerprint: entry.file_fingerprint.clone(),
+            desktop_shortcut: entry.desktop_shortcut,
+            menu_entry: entry.menu_entry,
+            mime_types: entry.mime_types.clone(),
+            exec_arg: entry.exec_arg.clone(),
         }
     }
 
@@ -122,6 +146,12 @@ impl AppMetadataFile {
             icon_path,
             asset_preference: self.asset_preference.clone(),
             added_at: self.added_at,
+            commit_hash: self.commit_hash.clone(),
+            file_fingerprint: self.file_fingerprint.clone(),
+            desktop_shortcut: self.desktop_shortcut,
+            menu_entry: self.menu_entry,
+            mime_types: self.mime_types.clone(),
+            exec_arg: self.exec_arg.clone(),
         }
     }
 }
@@ -207,6 +237,12 @@ mod tests {
             icon_path: local_path.parent().map(|p| p.join("icon.png")),
             asset_preference: Some("Example-x86_64.AppImage".into()),
             added_at: None,
+            commit_hash: None,
+            file_fingerprint: None,
+            desktop_shortcut: true,
+            menu_entry: true,
+            mime_types: None,
+            exec_arg: None,
         }
     }
 

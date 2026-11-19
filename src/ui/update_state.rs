@@ -1,15 +1,20 @@
-//! Bottom status footer: app count, "last checked", auto-check toggle, plus the
-//! activity / failed-operation list when work is in flight.
+//! Bottom status footer.
+//!
+//! The footer is the single home for download progress: every in-flight
+//! update/install is listed here with its own bar, bytes, ETA and Cancel
+//! button. AppImage cards only show that something is happening — they never
+//! duplicate progress UI. The status row (app count, "last checked", sort
+//! selector) stays pinned at the very bottom of the window.
 
-use crate::app::{AppSortBy, ManagerApp, OpKind};
+use crate::app::{ActiveOp, AppSortBy, FailedOp, ManagerApp, OpKind};
 use crate::ui::breakpoints::SizeClass;
 use crate::ui::format;
 use crate::ui::theme;
-use eframe::egui::{self, Align, CornerRadius, Layout, Margin, RichText, Sense, Stroke};
+use eframe::egui::{self, Align, CornerRadius, Layout, Margin, RichText, Stroke};
 
 pub fn render(ctx: &egui::Context, mgr: &mut ManagerApp, size_class: SizeClass) {
     let app_count = mgr.config.lock().map(|c| c.applications.len()).unwrap_or(0);
-    let mut auto_check = mgr.auto_check_enabled();
+    let has_activity = !mgr.ops.is_empty() || !mgr.failed_ops.is_empty();
 
     egui::TopBottomPanel::bottom("status_footer")
         .frame(
@@ -22,25 +27,15 @@ pub fn render(ctx: &egui::Context, mgr: &mut ManagerApp, size_class: SizeClass) 
                 )),
         )
         .show(ctx, |ui| {
-            // Activity first so the status row always sits at the very bottom.
-            if !mgr.ops.is_empty() || !mgr.failed_ops.is_empty() {
-                egui::ScrollArea::vertical()
-                    .id_salt("activity_footer")
-                    .max_height(footer_max_height(ctx, size_class))
-                    .show(ui, |ui| {
-                        render_activity(ui, mgr, size_class);
-                    });
+            if has_activity {
+                render_progress(ui, mgr, size_class);
                 ui.add_space(theme::SPACE_XS);
                 ui.separator();
                 ui.add_space(theme::SPACE_XS);
             }
 
-            render_status_bar(ui, mgr, app_count, &mut auto_check, size_class);
+            render_status_bar(ui, mgr, app_count, size_class);
         });
-
-    if auto_check != mgr.auto_check_enabled() {
-        mgr.set_auto_check_enabled(auto_check);
-    }
 
     // Keep "Last checked: 2 minutes ago" fresh while idle.
     if mgr.last_checked.is_some() {
@@ -48,152 +43,154 @@ pub fn render(ctx: &egui::Context, mgr: &mut ManagerApp, size_class: SizeClass) 
     }
 }
 
-fn render_activity(ui: &mut egui::Ui, mgr: &mut ManagerApp, size_class: SizeClass) {
-    if !mgr.ops.is_empty() {
-        ui.horizontal(|ui| {
+/// Aggregate progress view for all current downloads.
+fn render_progress(ui: &mut egui::Ui, mgr: &mut ManagerApp, size_class: SizeClass) {
+    let mut ops: Vec<ActiveOp> = mgr.ops.values().cloned().collect();
+    ops.sort_by_key(|op| op.started_at);
+    let failed = mgr.failed_ops.clone();
+
+    let mut cancel_id: Option<String> = None;
+    let mut retry_idx: Option<usize> = None;
+    let mut dismiss_idx: Option<usize> = None;
+
+    if !ops.is_empty() {
+        ui.horizontal_wrapped(|ui| {
             ui.label(
-                RichText::new("Activity")
+                RichText::new("Progress")
                     .strong()
                     .color(theme::TEXT_PRIMARY),
             );
-            ui.label(theme::muted_label(format!("{} in progress", mgr.ops.len())));
+            ui.label(theme::muted_label(active_count_label(ops.len())).size(12.0));
+            if ops.len() > 1 {
+                if let Some(overall) = overall_fraction(&ops) {
+                    ui.label(
+                        theme::secondary_label(format!("• {}% overall", percent_text(overall)))
+                            .size(12.0),
+                    );
+                }
+            }
         });
         ui.add_space(theme::SPACE_XS);
+    }
 
-        let mut ops: Vec<_> = mgr.ops.values().cloned().collect();
-        ops.sort_by_key(|o| o.started_at);
-        let mut cancel_id: Option<String> = None;
-        let active_limit = if size_class == SizeClass::Large {
-            usize::MAX
-        } else {
-            5
-        };
-        let active_visible = ops.len().min(active_limit);
-        let render_op = |ui: &mut egui::Ui,
-                         op: &crate::app::ActiveOp,
-                         cancel_id: &mut Option<String>| {
-            activity_frame(ui, |ui| {
-                let w = ui.available_width();
-                if w.is_finite() && w > 0.0 {
-                    ui.set_width(w);
-                }
-                ui.horizontal(|ui| {
-                    let kind = match op.kind {
-                        OpKind::Install => "Installing",
-                        OpKind::Update => "Updating",
-                    };
-                    ui.label(
-                        RichText::new(format!("{} • {}", kind, op.label))
-                            .strong()
-                            .color(theme::TEXT_PRIMARY),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.add(theme::secondary_button("Cancel")).clicked() {
-                            *cancel_id = Some(op.op_id.clone());
-                        }
-                    });
-                });
-                let fraction = if op.fraction.is_finite() {
-                    op.fraction.clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                ui.add(
-                    egui::ProgressBar::new(fraction)
-                        .show_percentage()
-                        .fill(theme::ACCENT),
-                );
-                let progress = format::format_progress(op.downloaded, op.total);
-                let eta = format::format_eta(op.started_at, op.downloaded, op.total);
-                ui.label(theme::secondary_label(format!("{} • ETA {}", progress, eta)).size(11.0));
-            });
-            ui.add_space(theme::SPACE_XS);
-        };
-        for op in ops.iter().take(active_visible) {
-            render_op(ui, op, &mut cancel_id);
-        }
-        if ops.len() > active_visible {
-            ui.collapsing(
-                format!("Show {} more…", ops.len() - active_visible),
-                |ui| {
-                    for op in ops.iter().skip(active_visible) {
-                        render_op(ui, op, &mut cancel_id);
-                    }
-                },
-            );
-        }
-        if let Some(id) = cancel_id {
-            mgr.cancel_op(&id);
+    egui::ScrollArea::vertical()
+        .id_salt("progress_footer")
+        .max_height(footer_max_height(ui.ctx(), size_class))
+        // Height must follow the content: never reserve a tall empty block in
+        // the footer when only one (or no) operation is listed.
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for op in &ops {
+                render_active_row(ui, op, &mut cancel_id);
+            }
+            if !failed.is_empty() {
+                render_failed_rows(ui, &failed, &ops, &mut retry_idx, &mut dismiss_idx);
+            }
+        });
+
+    if let Some(op_id) = cancel_id {
+        mgr.cancel_op(&op_id);
+    }
+    if let Some(idx) = retry_idx {
+        mgr.retry_failed(idx);
+    } else if let Some(idx) = dismiss_idx {
+        if idx < mgr.failed_ops.len() {
+            mgr.failed_ops.remove(idx);
         }
     }
-    if !mgr.failed_ops.is_empty() {
-        if !mgr.ops.is_empty() {
-            ui.separator();
+}
+
+fn render_active_row(ui: &mut egui::Ui, op: &ActiveOp, cancel_id: &mut Option<String>) {
+    activity_frame(ui, |ui| {
+        let width = ui.available_width();
+        if width.is_finite() && width > 0.0 {
+            ui.set_width(width);
         }
-        ui.label(
-            RichText::new("Failed operations")
-                .strong()
-                .color(theme::TEXT_PRIMARY),
-        );
-        ui.add_space(theme::SPACE_XS);
-        let mut to_retry: Option<usize> = None;
-        let mut to_dismiss: Option<usize> = None;
-        let failed_limit = if size_class == SizeClass::Large {
-            usize::MAX
-        } else {
-            3
-        };
-        let failed_visible = mgr.failed_ops.len().min(failed_limit);
-        let render_failed = |ui: &mut egui::Ui,
-                             i: usize,
-                             f: &crate::app::FailedOp,
-                             to_retry: &mut Option<usize>,
-                             to_dismiss: &mut Option<usize>| {
-            activity_frame(ui, |ui| {
-                let w = ui.available_width();
-                if w.is_finite() && w > 0.0 {
-                    ui.set_width(w);
+        ui.horizontal(|ui| {
+            // The stored label is already specific ("Update Codium").
+            let title = if op.label.trim().is_empty() {
+                match op.kind {
+                    OpKind::Install => "Installing".to_string(),
+                    OpKind::Update => "Updating".to_string(),
                 }
-                ui.label(
-                    RichText::new(format!("{}: {}", f.label, f.message))
-                        .color(theme::DANGER)
-                        .size(12.0),
-                );
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(f.retry.is_some(), theme::primary_button("Retry"))
-                        .clicked()
-                    {
-                        *to_retry = Some(i);
-                    }
-                    if ui.add(theme::secondary_button("Dismiss")).clicked() {
-                        *to_dismiss = Some(i);
-                    }
-                });
+            } else {
+                op.label.clone()
+            };
+            ui.add(
+                egui::Label::new(RichText::new(&title).strong().color(theme::TEXT_PRIMARY))
+                    .truncate(),
+            )
+            .on_hover_text(title);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add(theme::secondary_button("Cancel")).clicked() {
+                    *cancel_id = Some(op.op_id.clone());
+                }
             });
-            ui.add_space(theme::SPACE_XS);
-        };
-        for (i, f) in mgr.failed_ops.iter().take(failed_visible).enumerate() {
-            render_failed(ui, i, f, &mut to_retry, &mut to_dismiss);
-        }
-        if mgr.failed_ops.len() > failed_visible {
-            ui.collapsing(
-                format!("Show {} more…", mgr.failed_ops.len() - failed_visible),
-                |ui| {
-                    for (offset, f) in mgr.failed_ops.iter().skip(failed_visible).enumerate() {
-                        let i = failed_visible + offset;
-                        render_failed(ui, i, f, &mut to_retry, &mut to_dismiss);
-                    }
-                },
-            );
-        }
-        if let Some(i) = to_retry.take() {
-            mgr.retry_failed(i);
-        } else if let Some(i) = to_dismiss.take() {
-            if i < mgr.failed_ops.len() {
-                mgr.failed_ops.remove(i);
+        });
+
+        let fraction = sanitize_fraction(op.fraction);
+        let progress = format::format_progress(op.downloaded, op.total);
+        let eta = format::format_eta(op.started_at, op.downloaded, op.total);
+        let detail = format!("{}% • {} • ETA {}", percent_text(fraction), progress, eta);
+        ui.add(
+            egui::ProgressBar::new(fraction)
+                .text(RichText::new(detail).size(11.0))
+                .fill(theme::ACCENT)
+                .desired_height(18.0),
+        );
+    });
+    ui.add_space(theme::SPACE_XS);
+}
+
+fn render_failed_rows(
+    ui: &mut egui::Ui,
+    failed: &[FailedOp],
+    ops: &[ActiveOp],
+    retry_idx: &mut Option<usize>,
+    dismiss_idx: &mut Option<usize>,
+) {
+    if !ops.is_empty() {
+        ui.separator();
+    }
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Failed").strong().color(theme::TEXT_PRIMARY));
+        ui.label(theme::muted_label(failed_count_label(failed.len())).size(12.0));
+    });
+    ui.add_space(theme::SPACE_XS);
+
+    for (i, f) in failed.iter().enumerate() {
+        activity_frame(ui, |ui| {
+            let width = ui.available_width();
+            if width.is_finite() && width > 0.0 {
+                ui.set_width(width);
             }
-        }
+            ui.add(
+                egui::Label::new(
+                    RichText::new(&f.label)
+                        .strong()
+                        .color(theme::TEXT_PRIMARY)
+                        .size(12.0),
+                )
+                .truncate(),
+            );
+            ui.add(
+                egui::Label::new(RichText::new(&f.message).color(theme::DANGER).size(12.0))
+                    .truncate(),
+            )
+            .on_hover_text(&f.message);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(f.retry.is_some(), theme::primary_button("Retry"))
+                    .clicked()
+                {
+                    *retry_idx = Some(i);
+                }
+                if ui.add(theme::secondary_button("Dismiss")).clicked() {
+                    *dismiss_idx = Some(i);
+                }
+            });
+        });
+        ui.add_space(theme::SPACE_XS);
     }
 }
 
@@ -205,12 +202,12 @@ fn activity_frame(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
         .inner_margin(Margin::same(theme::SPACE_SM as i8))
         .show(ui, add_contents);
 }
-/// Status row: `3 AppImages · Last checked: 2 minutes ago   [Auto-check ◉]`
+
+/// Status row: `3 AppImages · Last checked: 2 minutes ago   [Sort: Name]`
 fn render_status_bar(
     ui: &mut egui::Ui,
     mgr: &mut ManagerApp,
     app_count: usize,
-    auto_check: &mut bool,
     size_class: SizeClass,
 ) {
     let count_text = apps_label(app_count);
@@ -231,10 +228,6 @@ fn render_status_bar(
                 ui.label(theme::muted_label(checked_text).size(12.0));
             });
             ui.horizontal_wrapped(|ui| {
-                let _ = toggle_switch(ui, auto_check)
-                    .on_hover_text("Check GitHub for new releases on startup");
-                ui.label(theme::secondary_label("Auto-check for updates").size(12.0));
-                ui.add_space(theme::SPACE_SM);
                 sort_selector(ui, mgr);
             });
         });
@@ -254,11 +247,6 @@ fn render_status_bar(
         ui.label(theme::muted_label(checked_text).size(12.0));
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let _ = toggle_switch(ui, auto_check)
-                .on_hover_text("Check GitHub for new releases on startup");
-            ui.add_space(theme::SPACE_XS);
-            ui.label(theme::secondary_label("Auto-check for updates").size(12.0));
-            ui.add_space(theme::SPACE_MD);
             sort_selector(ui, mgr);
         });
     });
@@ -279,45 +267,64 @@ fn sort_selector(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
         });
 }
 
-/// Minimal toggle switch: pill track + sliding knob (no bitmap assets).
-fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
-    let desired = egui::vec2(38.0, 20.0);
-    let (rect, mut response) = ui.allocate_exact_size(desired, Sense::click());
-    if response.clicked() {
-        *on = !*on;
-        response.mark_changed();
-    }
-    if rect.is_finite() && rect.width() > 0.0 && rect.height() > 0.0 {
-        let t = ui.ctx().animate_bool(response.id, *on);
-        let track = if *on { theme::ACCENT } else { theme::NEUTRAL };
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(theme::RADIUS_PILL), track);
-        if *on {
-            ui.painter().rect_stroke(
-                rect,
-                CornerRadius::same(theme::RADIUS_PILL),
-                Stroke::new(1.0_f32, theme::ACCENT_HOVER),
-                egui::StrokeKind::Inside,
-            );
-        }
-        let radius = (rect.height() * 0.5 - 3.0).max(1.0);
-        let left = rect.left() + radius + 3.0;
-        let right = rect.right() - radius - 3.0;
-        let cx = egui::lerp(left..=right, t);
-        ui.painter().circle_filled(
-            egui::pos2(cx, rect.center().y),
-            radius,
-            egui::Color32::WHITE,
-        );
-    }
-    response
-}
-
 fn apps_label(count: usize) -> String {
     if count == 1 {
         "1 AppImage".to_string()
     } else {
         format!("{count} AppImages")
+    }
+}
+
+fn active_count_label(count: usize) -> String {
+    if count == 1 {
+        "1 download in progress".to_string()
+    } else {
+        format!("{count} downloads in progress")
+    }
+}
+
+fn failed_count_label(count: usize) -> String {
+    if count == 1 {
+        "1 failed download".to_string()
+    } else {
+        format!("{count} failed downloads")
+    }
+}
+
+fn sanitize_fraction(fraction: f32) -> f32 {
+    if fraction.is_finite() {
+        fraction.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn percent_text(fraction: f32) -> i32 {
+    (sanitize_fraction(fraction) * 100.0).round() as i32
+}
+
+/// Weighted progress across every active operation. Falls back to the mean of
+/// per-operation fractions while content lengths are still unknown.
+fn overall_fraction(ops: &[ActiveOp]) -> Option<f32> {
+    if ops.is_empty() {
+        return None;
+    }
+    let all_have_total = ops.iter().all(|op| op.total.is_some_and(|total| total > 0));
+    if all_have_total {
+        let total = ops
+            .iter()
+            .filter_map(|op| op.total)
+            .fold(0_u64, u64::saturating_add);
+        let downloaded = ops
+            .iter()
+            .map(|op| op.downloaded)
+            .fold(0_u64, u64::saturating_add);
+        Some(sanitize_fraction(
+            (downloaded as f64 / total.max(1) as f64) as f32,
+        ))
+    } else {
+        let sum: f32 = ops.iter().map(|op| sanitize_fraction(op.fraction)).sum();
+        Some(sanitize_fraction(sum / ops.len() as f32))
     }
 }
 
@@ -332,11 +339,65 @@ fn footer_max_height(ctx: &egui::Context, size_class: SizeClass) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use std::time::Instant;
 
     #[test]
     fn apps_label_is_plural_aware() {
         assert_eq!(apps_label(0), "0 AppImages");
         assert_eq!(apps_label(1), "1 AppImage");
         assert_eq!(apps_label(3), "3 AppImages");
+    }
+
+    #[test]
+    fn counts_are_plural_aware() {
+        assert_eq!(active_count_label(1), "1 download in progress");
+        assert_eq!(active_count_label(4), "4 downloads in progress");
+        assert_eq!(failed_count_label(1), "1 failed download");
+        assert_eq!(failed_count_label(2), "2 failed downloads");
+    }
+
+    fn op(fraction: f32, downloaded: u64, total: Option<u64>) -> ActiveOp {
+        ActiveOp {
+            op_id: "op".into(),
+            app_id: Some("app".into()),
+            label: "Update App".into(),
+            kind: OpKind::Update,
+            fraction,
+            downloaded,
+            total,
+            started_at: Instant::now(),
+            last_update: Instant::now(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            retry: None,
+        }
+    }
+
+    #[test]
+    fn overall_fraction_is_byte_weighted_when_totals_are_known() {
+        let ops = vec![op(0.9, 90, Some(100)), op(0.0, 0, Some(300))];
+        let overall = overall_fraction(&ops).unwrap();
+        assert!((overall - 0.225).abs() < 1e-4, "got {overall}");
+    }
+
+    #[test]
+    fn overall_fraction_falls_back_to_mean_while_totals_are_unknown() {
+        let ops = vec![op(0.5, 10, None), op(0.25, 5, None)];
+        let overall = overall_fraction(&ops).unwrap();
+        assert!((overall - 0.375).abs() < 1e-4, "got {overall}");
+    }
+
+    #[test]
+    fn overall_fraction_handles_no_operations() {
+        assert!(overall_fraction(&[]).is_none());
+    }
+
+    #[test]
+    fn percentages_and_fractions_are_sanitized() {
+        assert_eq!(percent_text(f32::NAN), 0);
+        assert_eq!(percent_text(-1.0), 0);
+        assert_eq!(percent_text(1.5), 100);
+        assert_eq!(sanitize_fraction(0.42), 0.42);
     }
 }

@@ -7,10 +7,9 @@
 //! All backend interactions are funneled through [`CardActions`] so the card is
 //! rendered first and `ManagerApp` is mutated afterwards (no borrow conflicts).
 
-use crate::app::{AppDownloadState, AppSortBy, BackendCommand, ManagerApp};
+use crate::app::{AppDownloadState, AppSortBy, BackendCommand, LocalFileIssue, ManagerApp};
 use crate::config::{AppEntry, AppSource};
 use crate::ui::breakpoints::SizeClass;
-use crate::ui::format;
 use crate::ui::theme::{self, BadgeKind};
 use eframe::egui::{self, Align, Layout, RichText, Sense, Stroke};
 
@@ -21,22 +20,13 @@ enum CardState {
     Failed,
 }
 
-/// Snapshot of an in-flight download for one card.
-struct DownloadSnapshot {
-    op_id: String,
-    fraction: f32,
-    downloaded: u64,
-    total: Option<u64>,
-    started_at: std::time::Instant,
-}
-
 /// Per-card layout decisions derived from the available card width.
 struct CardLayout {
     /// App icon edge length (large 64 px, down to 48 px when tight).
     icon_size: f32,
     /// Display-name font size.
     name_size: f32,
-    /// Compact cards use a full-width progress row and tighter actions.
+    /// Compact cards use tighter, full-width actions.
     compact: bool,
 }
 
@@ -174,7 +164,6 @@ fn render_empty_state(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
 /// Collected action intents from card buttons; avoids &mut bool proliferation.
 #[derive(Default)]
 struct CardActions {
-    cancel_op_id: Option<String>,
     retry_app: bool,
     launch: bool,
     edit: bool,
@@ -182,31 +171,27 @@ struct CardActions {
     add_to: bool,
     delete: bool,
     show_folder: bool,
+    accept_current: bool,
 }
 
 fn render_app_card(ui: &mut egui::Ui, mgr: &mut ManagerApp, app: &AppEntry) {
     let update_info = mgr.update_available.get(&app.id).cloned();
-    let latest_tag = update_info.as_ref().map(|(tag, _, _)| tag.clone());
+    let latest_tag = update_info.as_ref().map(|update| update.tag.clone());
     let has_update = update_info.is_some();
+    let file_issue = mgr.file_issues.get(&app.id).copied();
 
+    // Download progress itself lives in the single bottom progress view; the
+    // card only reflects *what* is happening so it can disable its actions.
     let (downloading, failed_msg) = match mgr.app_download_state(&app.id) {
-        AppDownloadState::Downloading(op) => (
-            Some(DownloadSnapshot {
-                op_id: op.op_id.clone(),
-                fraction: op.fraction,
-                downloaded: op.downloaded,
-                total: op.total,
-                started_at: op.started_at,
-            }),
-            None,
+        AppDownloadState::Downloading => (true, None),
+        AppDownloadState::Failed(failed) => (
+            false,
+            Some((failed.message.clone(), failed.retry.is_some())),
         ),
-        AppDownloadState::Failed(failed) => {
-            (None, Some((failed.message.clone(), failed.retry.is_some())))
-        }
-        AppDownloadState::Idle => (None, None),
+        AppDownloadState::Idle => (false, None),
     };
 
-    let card_state = if downloading.is_some() {
+    let card_state = if downloading {
         CardState::Downloading
     } else if failed_msg.is_some() {
         CardState::Failed
@@ -269,7 +254,6 @@ fn render_app_card(ui: &mut egui::Ui, mgr: &mut ManagerApp, app: &AppEntry) {
                         &layout,
                         card_state,
                         has_update,
-                        downloading.as_ref(),
                         failed_msg.as_ref(),
                         &mut actions,
                     );
@@ -281,6 +265,7 @@ fn render_app_card(ui: &mut egui::Ui, mgr: &mut ManagerApp, app: &AppEntry) {
                     app,
                     card_state,
                     has_update,
+                    file_issue,
                     mgr,
                     latest_tag.as_deref(),
                     egui::vec2(badge_w, 26.0),
@@ -292,7 +277,12 @@ fn render_app_card(ui: &mut egui::Ui, mgr: &mut ManagerApp, app: &AppEntry) {
     // Overflow menu: foreground overlay anchored under the ••• button and kept
     // inside the card's bounds. It does not participate in the card's layout.
     if menu_open && more_btn_rect.is_finite() {
-        let pos = theme::menu_popup_pos(more_btn_rect, card.response.rect);
+        let menu_height = if file_issue == Some(LocalFileIssue::Changed) {
+            theme::MENU_HEIGHT
+        } else {
+            theme::MENU_HEIGHT - (theme::MENU_ITEM_HEIGHT + theme::SPACE_SM)
+        };
+        let pos = theme::menu_popup_pos(more_btn_rect, card.response.rect, menu_height);
         let area = egui::Area::new(menu_id.with("popup"))
             .order(egui::Order::Foreground)
             .fixed_pos(pos)
@@ -301,6 +291,20 @@ fn render_app_card(ui: &mut egui::Ui, mgr: &mut ManagerApp, app: &AppEntry) {
                     ui.set_min_width(theme::MENU_WIDTH);
                     ui.spacing_mut().item_spacing.y = theme::SPACE_SM;
 
+                    if file_issue == Some(LocalFileIssue::Changed)
+                        && ui
+                            .add_sized(
+                                [theme::MENU_WIDTH, theme::MENU_ITEM_HEIGHT],
+                                theme::menu_secondary_button("Mark as Up to Date"),
+                            )
+                            .on_hover_text(
+                                "Accept the current AppImage file and clear the changed-on-disk warning.",
+                            )
+                            .clicked()
+                    {
+                        actions.accept_current = true;
+                        menu_open = false;
+                    }
                     if ui
                         .add_sized(
                             [theme::MENU_WIDTH, theme::MENU_ITEM_HEIGHT],
@@ -340,11 +344,11 @@ fn render_app_card(ui: &mut egui::Ui, mgr: &mut ManagerApp, app: &AppEntry) {
     ui.data_mut(|data| data.insert_temp(menu_id, menu_open));
 
     // Apply actions after card is rendered (avoids borrow conflicts)
-    if let Some(op_id) = actions.cancel_op_id {
-        mgr.cancel_op(&op_id);
-    }
     if actions.retry_app {
         mgr.retry_failed_for_app(&app.id);
+    }
+    if actions.accept_current {
+        mgr.accept_current_file(&app.id);
     }
     if actions.launch {
         mgr.send_cmd(BackendCommand::Launch {
@@ -355,8 +359,8 @@ fn render_app_card(ui: &mut egui::Ui, mgr: &mut ManagerApp, app: &AppEntry) {
         mgr.open_edit(app);
     }
     if actions.update {
-        if let Some((tag, url, _asset)) = update_info {
-            mgr.start_update_download(app.id.clone(), url, tag);
+        if let Some(update) = update_info {
+            mgr.start_update_download(app.id.clone(), update.url, update.tag, update.commit_hash);
         }
     }
     if actions.add_to {
@@ -405,10 +409,20 @@ fn render_info_block(
     ui.add_space(theme::SPACE_XS);
 
     // ── Current / latest versions ───────────────────────────────────────
-    let current = if app.current_version.trim().is_empty() {
-        "unknown".to_string()
-    } else {
-        app.current_version.clone()
+    let file_issue = mgr.file_issues.get(&app.id).copied();
+    let (current, current_text_color) = match file_issue {
+        // The metadata no longer describes the file on disk.
+        Some(LocalFileIssue::Missing) => ("missing".to_string(), theme::DANGER),
+        Some(LocalFileIssue::Changed) => ("modified".to_string(), theme::WARNING),
+        None if app.current_version.trim().is_empty() => {
+            ("unknown".to_string(), theme::TEXT_SECONDARY)
+        }
+        None => (app.current_version.clone(), theme::TEXT_SECONDARY),
+    };
+    let current_dot_color = match file_issue {
+        Some(LocalFileIssue::Missing) => theme::DANGER,
+        Some(LocalFileIssue::Changed) => theme::WARNING,
+        None => theme::TEXT_MUTED,
     };
     let latest_known = latest_tag
         .map(|tag| tag.to_string())
@@ -422,9 +436,26 @@ fn render_info_block(
 
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 5.0;
-        theme::status_dot(ui, theme::TEXT_MUTED);
+        theme::status_dot(ui, current_dot_color);
         ui.label(theme::muted_label("Current").size(11.0));
-        ui.label(theme::secondary_label(current).size(12.0).strong());
+        let current_label = RichText::new(current)
+            .size(12.0)
+            .strong()
+            .color(current_text_color);
+        let current_response = ui.label(current_label);
+        match file_issue {
+            Some(LocalFileIssue::Missing) => {
+                current_response.on_hover_text(
+                    "The managed AppImage file is missing. Check for updates to restore it.",
+                );
+            }
+            Some(LocalFileIssue::Changed) => {
+                current_response.on_hover_text(
+                    "Replaced outside AppImage Hub; its real version is unknown. Update it or use ⋯ → Mark as Up to Date.",
+                );
+            }
+            None => {}
+        }
         ui.add_space(theme::SPACE_SM);
         theme::status_dot(ui, latest_color);
         ui.label(theme::muted_label("Latest").size(11.0));
@@ -438,20 +469,26 @@ fn render_info_block(
 }
 
 /// Status pill: green = up to date, purple = update available, grey = none.
+#[allow(clippy::too_many_arguments)]
 fn render_status_badge(
     ui: &mut egui::Ui,
     app: &AppEntry,
     state: CardState,
     has_update: bool,
+    file_issue: Option<LocalFileIssue>,
     mgr: &ManagerApp,
     latest_tag: Option<&str>,
     size: egui::Vec2,
 ) {
     let (text, kind) = match state {
-        CardState::Downloading => ("Downloading", BadgeKind::Accent),
+        CardState::Downloading => ("Updating", BadgeKind::Accent),
         CardState::Failed => ("Failed", BadgeKind::Danger),
         CardState::Idle => {
-            if has_update {
+            if file_issue == Some(LocalFileIssue::Missing) {
+                ("Missing file", BadgeKind::Danger)
+            } else if file_issue == Some(LocalFileIssue::Changed) {
+                ("Changed on disk", BadgeKind::Warning)
+            } else if has_update {
                 ("Update available", BadgeKind::Accent)
             } else if source_text(app).is_none() {
                 ("Local only", BadgeKind::Neutral)
@@ -462,7 +499,19 @@ fn render_status_badge(
             }
         }
     };
-    theme::badge_sized(ui, text, kind, size);
+    let response = theme::badge_sized(ui, text, kind, size);
+    match file_issue {
+        Some(LocalFileIssue::Missing) => {
+            response
+                .on_hover_text("The managed AppImage is missing. Check for updates to restore it.");
+        }
+        Some(LocalFileIssue::Changed) => {
+            response.on_hover_text(
+                "Replaced outside AppImage Hub. Update it, or use ⋯ → Mark as Up to Date to accept the current file.",
+            );
+        }
+        None => {}
+    }
 }
 
 fn render_actions(
@@ -470,16 +519,11 @@ fn render_actions(
     layout: &CardLayout,
     state: CardState,
     has_update: bool,
-    downloading: Option<&DownloadSnapshot>,
     failed_msg: Option<&(String, bool)>,
     actions: &mut CardActions,
 ) {
     match state {
-        CardState::Downloading => {
-            if let Some(download) = downloading {
-                render_downloading(ui, layout, download, &mut actions.cancel_op_id);
-            }
-        }
+        CardState::Downloading => render_updating(ui),
         CardState::Failed => {
             if let Some((msg, can_retry)) = failed_msg {
                 render_failed(ui, layout, msg, *can_retry, &mut actions.retry_app);
@@ -489,71 +533,16 @@ fn render_actions(
     }
 }
 
-/// Progress bar + percentage + ETA + Cancel.
-fn render_downloading(
-    ui: &mut egui::Ui,
-    layout: &CardLayout,
-    download: &DownloadSnapshot,
-    cancel_op_id: &mut Option<String>,
-) {
-    let DownloadSnapshot {
-        op_id,
-        fraction,
-        downloaded,
-        total,
-        started_at,
-    } = download;
-    let fraction = *fraction;
-    let downloaded = *downloaded;
-    let total = *total;
-    let started_at = *started_at;
-    let fraction = if fraction.is_finite() {
-        fraction.clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let eta = format::format_eta(started_at, downloaded, total);
-    let progress = format::format_progress(downloaded, total);
-
-    let bar = |ui: &mut egui::Ui, width: f32| {
-        ui.add(
-            egui::ProgressBar::new(fraction)
-                .show_percentage()
-                .fill(theme::ACCENT)
-                .desired_width(width.max(80.0)),
-        );
-    };
-
-    if layout.compact {
-        ui.vertical(|ui| {
-            let w = ui.available_width().max(120.0);
-            bar(ui, w);
-            ui.add_space(theme::SPACE_XS);
-            ui.label(theme::secondary_label(format!("{progress} • ETA {eta}")).size(11.0));
-            if ui
-                .add_sized([w, 32.0], theme::secondary_button("Cancel"))
-                .clicked()
-            {
-                *cancel_op_id = Some(op_id.to_string());
-            }
-        });
-    } else {
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                let cancel_w = 96.0;
-                let spacing = ui.spacing().item_spacing.x;
-                let bar_w = (ui.available_width() - cancel_w - spacing).max(140.0);
-                bar(ui, bar_w);
-                if ui
-                    .add_sized([cancel_w, 32.0], theme::secondary_button("Cancel"))
-                    .clicked()
-                {
-                    *cancel_op_id = Some(op_id.to_string());
-                }
-            });
-            ui.label(theme::secondary_label(format!("{progress} • ETA {eta}")).size(11.0));
-        });
-    }
+/// The card no longer renders its own progress bar; the single progress view
+/// at the bottom of the window owns all download details and the Cancel
+/// action for every in-flight update.
+fn render_updating(ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        ui.add(egui::Spinner::new().size(14.0));
+        ui.label(theme::muted_label("Updating…").size(12.0));
+    })
+    .response
+    .on_hover_text("Progress is shown in the download bar at the bottom of the window");
 }
 
 fn render_failed(
@@ -768,6 +757,12 @@ mod tests {
             startup_notify: true,
             asset_preference: None,
             added_at,
+            commit_hash: None,
+            file_fingerprint: None,
+            desktop_shortcut: true,
+            menu_entry: true,
+            mime_types: None,
+            exec_arg: None,
         }
     }
 

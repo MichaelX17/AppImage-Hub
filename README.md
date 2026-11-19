@@ -9,6 +9,7 @@ A modern desktop GUI for downloading, managing, updating, and launching AppImage
 - **Add AppImages** — import a local AppImage, track a local file with a GitHub repository, or download directly from GitHub releases
 - **Modern add/edit panel** — clean full-width form fields, category selector, validation, and launch-argument configuration
 - **GitHub update tracking** — checks the latest release and updates AppImages in place
+- **External change detection** — fingerprints each managed AppImage (size + mtime, confirmed with SHA-256 when they differ); a file replaced outside AppImage Hub is flagged as **Changed on disk** (or **Missing file**) within a second, and can be updated or accepted via **⋯ → Mark as Up to Date**
 - **Run... actions** — when an update is available, choose **Launch** or **Update** from one dropdown
 - **Update management** — check all updates with a smooth progress indicator, update individual apps, or update everything at once
 - **Sorting** — sort the app list by **Name**, **Size**, **Date added**, **GitHub**, or **Local**
@@ -56,7 +57,7 @@ cargo run
 
 ```bash
 cargo build --release
-./target/release/appimage-manager
+./target/release/appimage-hub
 ```
 
 ### Build the AppImage

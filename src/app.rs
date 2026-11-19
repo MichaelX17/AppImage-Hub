@@ -21,11 +21,18 @@ pub enum BackendCommand {
     CheckUpdate {
         app_id: String,
     },
+    CheckHubUpdate,
+    SelfUpdate {
+        url: String,
+        target: PathBuf,
+        cancel: Arc<AtomicBool>,
+    },
     DownloadAndReplace {
         op_id: String,
         app_id: String,
         url: String,
         tag: String,
+        commit_hash: String,
         cancel: Arc<AtomicBool>,
     },
     InstallFromRepo {
@@ -36,10 +43,20 @@ pub enum BackendCommand {
         /// Desktop category selected in the UI, already `;`-terminated.
         /// Takes precedence over anything detected inside the AppImage.
         categories: Option<String>,
+        desktop_shortcut: bool,
+        menu_entry: bool,
+        mime_types: Option<String>,
+        exec_arg: Option<String>,
         cancel: Arc<AtomicBool>,
     },
     FetchRepoAssets {
         repo: String,
+    },
+    SetGithubToken(Option<String>),
+    /// Re-baseline the installed file as accepted, clearing a "changed on
+    /// disk" warning without downloading anything.
+    AcceptCurrentFile {
+        app_id: String,
     },
     Launch {
         app_id: String,
@@ -61,11 +78,24 @@ pub enum BackendEvent {
         app_id: String,
         tag: String,
         url: String,
-        asset_name: String,
+        commit_hash: String,
     },
     UpToDate {
         app_id: String,
         tag: String,
+    },
+    HubUpdateAvailable {
+        url: String,
+    },
+    HubUpToDate,
+    HubUpdateProgress {
+        fraction: f32,
+        downloaded: u64,
+        total: Option<u64>,
+    },
+    HubUpdateReady,
+    HubUpdateFailed {
+        message: String,
     },
     DownloadStarted {
         op_id: String,
@@ -97,6 +127,11 @@ pub enum BackendEvent {
         op_id: Option<String>,
         app_id: Option<String>,
         message: String,
+    },
+    /// Result of manually accepting the current AppImage file.
+    FileAccepted {
+        app_id: String,
+        error: Option<String>,
     },
 }
 
@@ -136,11 +171,38 @@ impl AppSortBy {
     }
 }
 
+/// Update-check cooldown without a GitHub token (60 requests/hour limit).
+const UPDATE_CHECK_COOLDOWN_SECS: u64 = 5 * 60;
+/// Update-check cooldown with a GitHub token (5,000 requests/hour limit).
+const AUTHENTICATED_UPDATE_CHECK_COOLDOWN_SECS: u64 = 2 * 60;
+
+fn token_is_present(token: Option<&str>) -> bool {
+    token.is_some_and(|token| !token.trim().is_empty())
+}
+
+fn update_check_cooldown_secs(has_github_token: bool) -> u64 {
+    if has_github_token {
+        AUTHENTICATED_UPDATE_CHECK_COOLDOWN_SECS
+    } else {
+        UPDATE_CHECK_COOLDOWN_SECS
+    }
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
+}
+
+fn update_check_cooldown_remaining(
+    last_check: Option<i64>,
+    now: i64,
+    cooldown_secs: u64,
+) -> Option<u64> {
+    let last = last_check?;
+    let elapsed = now.saturating_sub(last).max(0) as u64;
+    (elapsed < cooldown_secs).then(|| cooldown_secs - elapsed)
 }
 
 #[derive(Debug, Clone)]
@@ -166,12 +228,24 @@ pub enum RetryAction {
         display_name: String,
         asset_name: Option<String>,
         categories: Option<String>,
+        desktop_shortcut: bool,
+        menu_entry: bool,
+        mime_types: Option<String>,
+        exec_arg: Option<String>,
     },
     DownloadAndReplace {
         app_id: String,
         url: String,
         tag: String,
+        commit_hash: String,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct AvailableUpdate {
+    pub tag: String,
+    pub url: String,
+    pub commit_hash: String,
 }
 
 #[derive(Debug, Clone)]
@@ -219,9 +293,18 @@ pub struct FailedOp {
 }
 
 pub enum AppDownloadState<'a> {
-    Downloading(&'a ActiveOp),
+    Downloading,
     Failed(&'a FailedOp),
     Idle,
+}
+
+/// Local file problem detected without contacting GitHub.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalFileIssue {
+    /// The AppImage exists but no longer matches the recorded fingerprint.
+    Changed,
+    /// The configured AppImage path does not exist.
+    Missing,
 }
 
 #[derive(Debug, Clone)]
@@ -240,13 +323,15 @@ pub struct ManagerApp {
     pub(crate) failed_ops: Vec<FailedOp>,
     pub(crate) status: Option<String>,
     pub(crate) pending_delete: Option<String>,
-    pub(crate) update_available: HashMap<String, (String, String, String)>,
+    pub(crate) update_available: HashMap<String, AvailableUpdate>,
     pub(crate) latest_versions: HashMap<String, String>,
     pub(crate) is_form_open: bool,
     pub(crate) side_panel_form: crate::ui::side_panel::SidePanelFormState,
     pub(crate) add_to: Option<AddToState>,
     pub(crate) side_panel_width: f32,
     pub(crate) show_side_panel: bool,
+    pub(crate) show_settings: bool,
+    pub(crate) settings_form: crate::ui::settings_panel::SettingsFormState,
     /// True until the user picks where AppImages should be stored.
     first_run_setup: bool,
     /// When the last GitHub update check completed (drives the footer label).
@@ -255,6 +340,20 @@ pub struct ManagerApp {
     pub(crate) auto_check_done: bool,
     pub(crate) sort_by: AppSortBy,
     pub(crate) update_check: Option<UpdateCheckProgress>,
+    pub(crate) hub_update_url: Option<String>,
+    pub(crate) hub_update_progress: Option<f32>,
+    hub_update_check_started: bool,
+    /// Whether a GitHub token is configured. Authenticated checks may run on a
+    /// shorter cooldown than anonymous ones.
+    has_github_token: bool,
+    /// Number of footer activity items rendered on the previous frame.
+    /// egui caches bottom-panel heights for one frame, so any change in the
+    /// progress list needs a follow-up repaint to re-anchor the footer at the
+    /// window bottom (otherwise a blank gap is left until the next input).
+    activity_footer_items: usize,
+    /// Local (offline) per-app file problems, refreshed periodically.
+    pub(crate) file_issues: HashMap<String, LocalFileIssue>,
+    last_file_scan: Option<Instant>,
 }
 
 pub fn setup_custom_style(ctx: &egui::Context) {
@@ -266,12 +365,19 @@ impl ManagerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         github::ensure_crypto_provider();
         setup_custom_style(&cc.egui_ctx);
-        desktop_entry::ensure_hub_desktop_entry();
 
         let config = Arc::new(Mutex::new(Config::load().unwrap_or_else(|e| {
             eprintln!("failed to load config: {e:#}");
             Config::default()
         })));
+
+        if let Ok(cfg) = config.lock() {
+            desktop_entry::sync_hub_shortcuts(
+                cfg.hub_start_menu_shortcut,
+                cfg.hub_desktop_shortcut,
+                &cfg.hub_start_menu_category,
+            );
+        }
 
         let side_panel_width = cc
             .storage
@@ -287,7 +393,14 @@ impl ManagerApp {
             .unwrap_or(true);
         let (cmd_tx, cmd_rx) = mpsc::channel::<BackendCommand>(64);
         let (evt_tx, evt_rx) = mpsc::channel::<BackendEvent>(256);
-        spawn_backend(config.clone(), cmd_rx, evt_tx);
+        let github_token = crate::secrets::load_github_token().or_else(|| {
+            std::env::var("GITHUB_TOKEN")
+                .ok()
+                .or_else(|| std::env::var("GH_TOKEN").ok())
+                .filter(|token| !token.trim().is_empty())
+        });
+        let has_github_token = token_is_present(github_token.as_deref());
+        spawn_backend(config.clone(), cmd_rx, evt_tx, github_token);
 
         let mut app = Self {
             config,
@@ -304,17 +417,27 @@ impl ManagerApp {
             add_to: None,
             side_panel_width,
             show_side_panel,
+            show_settings: false,
+            settings_form: crate::ui::settings_panel::SettingsFormState::default(),
             first_run_setup,
             last_checked: None,
             auto_check_done: false,
             sort_by: AppSortBy::Name,
             update_check: None,
+            hub_update_url: None,
+            hub_update_progress: None,
+            hub_update_check_started: false,
+            has_github_token,
+            activity_footer_items: 0,
+            file_issues: HashMap::new(),
+            last_file_scan: None,
         };
         if !app.first_run_setup {
             app.repair_missing_icons();
             app.normalize_managed_filenames();
             app.sync_metadata_files();
         }
+        app.refresh_file_issues();
         app
     }
 
@@ -474,12 +597,19 @@ impl ManagerApp {
                 app_id,
                 tag,
                 url,
-                asset_name,
+                commit_hash,
             } => {
                 self.finish_update_check_item(&app_id);
                 self.last_checked = Some(Instant::now());
                 self.latest_versions.insert(app_id.clone(), tag.clone());
-                self.update_available.insert(app_id, (tag, url, asset_name));
+                self.update_available.insert(
+                    app_id,
+                    AvailableUpdate {
+                        tag,
+                        url,
+                        commit_hash,
+                    },
+                );
             }
             BackendEvent::UpToDate { app_id, tag } => {
                 self.finish_update_check_item(&app_id);
@@ -487,12 +617,40 @@ impl ManagerApp {
                 self.latest_versions.insert(app_id.clone(), tag);
                 self.update_available.remove(&app_id);
             }
+            BackendEvent::HubUpdateAvailable { url } => {
+                self.hub_update_url = Some(url);
+            }
+            BackendEvent::HubUpToDate => {
+                self.hub_update_url = None;
+            }
+            BackendEvent::HubUpdateProgress { fraction, .. } => {
+                self.hub_update_progress = Some(fraction.clamp(0.0, 1.0));
+            }
+            BackendEvent::HubUpdateReady => {
+                self.hub_update_progress = None;
+                if let Some(target) = current_appimage_path() {
+                    let _ = std::process::Command::new(target).spawn();
+                }
+                std::process::exit(0);
+            }
+            BackendEvent::HubUpdateFailed { message } => {
+                self.hub_update_progress = None;
+                self.status = Some(format!("AppImage Hub update failed: {message}"));
+            }
             BackendEvent::DownloadStarted {
                 op_id,
                 app_id,
                 label,
                 kind,
             } => {
+                // The UI inserts its operation before sending the command, with
+                // a human-readable label, retry metadata and the same cancel
+                // flag the backend received. Do not overwrite it: doing so
+                // would replace the cancel flag (breaking Cancel) and show the
+                // raw app id in the progress view.
+                if self.ops.contains_key(&op_id) {
+                    return;
+                }
                 let now = Instant::now();
                 self.ops.insert(
                     op_id.clone(),
@@ -584,15 +742,32 @@ impl ManagerApp {
                     self.failed_ops.drain(0..drain);
                 }
             }
+            BackendEvent::FileAccepted { app_id, error } => {
+                if let Some(message) = error {
+                    self.status = Some(format!("Could not update file metadata: {message}"));
+                } else {
+                    self.update_available.remove(&app_id);
+                    self.status = Some(format!(
+                        "Marked {} as up to date.",
+                        self.app_display_name(&app_id)
+                    ));
+                }
+                self.refresh_file_issues();
+            }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn start_install_from_repo(
         &mut self,
         github_repo: String,
         display_name: String,
         asset_name: Option<String>,
         categories: Option<String>,
+        desktop_shortcut: bool,
+        menu_entry: bool,
+        mime_types: Option<String>,
+        exec_arg: Option<String>,
     ) {
         let op_id = Uuid::new_v4().to_string();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -620,6 +795,10 @@ impl ManagerApp {
                     display_name: display_name.clone(),
                     asset_name: asset_name.clone(),
                     categories: categories.clone(),
+                    desktop_shortcut,
+                    menu_entry,
+                    mime_types: mime_types.clone(),
+                    exec_arg: exec_arg.clone(),
                 }),
             },
         );
@@ -629,11 +808,30 @@ impl ManagerApp {
             display_name,
             asset_name,
             categories,
+            desktop_shortcut,
+            menu_entry,
+            mime_types,
+            exec_arg,
             cancel,
         });
     }
 
-    pub(crate) fn start_update_download(&mut self, app_id: String, url: String, tag: String) {
+    pub(crate) fn start_update_download(
+        &mut self,
+        app_id: String,
+        url: String,
+        tag: String,
+        commit_hash: String,
+    ) {
+        // One operation per app at a time; the bottom progress view aggregates
+        // every active update, so duplicate rows must never appear.
+        if self
+            .ops
+            .values()
+            .any(|op| op.app_id.as_deref() == Some(app_id.as_str()))
+        {
+            return;
+        }
         let op_id = Uuid::new_v4().to_string();
         let cancel = Arc::new(AtomicBool::new(false));
         let label = format!("Update {}", self.app_display_name(&app_id));
@@ -655,6 +853,7 @@ impl ManagerApp {
                     app_id: app_id.clone(),
                     url: url.clone(),
                     tag: tag.clone(),
+                    commit_hash: commit_hash.clone(),
                 }),
             },
         );
@@ -663,6 +862,7 @@ impl ManagerApp {
             app_id,
             url,
             tag,
+            commit_hash,
             cancel,
         });
     }
@@ -698,6 +898,7 @@ impl ManagerApp {
 
     pub(crate) fn open_add_form(&mut self) {
         self.add_to = None;
+        self.show_settings = false;
         self.side_panel_form.clear();
         self.status = None;
         self.is_form_open = true;
@@ -739,7 +940,28 @@ impl ManagerApp {
             ("Custom".to_string(), cat_str.to_string())
         };
 
+        let mut mime_types = entry.mime_types.clone();
+        let mut exec_arg = entry.exec_arg.clone();
+        if (mime_types.is_none() || exec_arg.is_none()) && entry.local_path.exists() {
+            if let Some(meta) = appmeta::read_for_appimage(&entry.local_path) {
+                if mime_types.is_none() {
+                    mime_types = meta.mime_types.clone();
+                }
+                if exec_arg.is_none() {
+                    exec_arg = meta.exec_arg.clone();
+                }
+            } else if let Ok(meta) = crate::appimage::extract_metadata(&entry.local_path, None) {
+                if mime_types.is_none() {
+                    mime_types = meta.mime_types;
+                }
+                if exec_arg.is_none() {
+                    exec_arg = meta.exec_arg;
+                }
+            }
+        }
+
         self.add_to = None;
+        self.show_settings = false;
         let asset_selection_mode = if entry.asset_preference.is_some() {
             crate::ui::side_panel::AssetSelectionMode::Manual
         } else {
@@ -755,6 +977,10 @@ impl ManagerApp {
             category_user_selected: true,
             detected_category: None,
             startup_notify: entry.startup_notify,
+            desktop_shortcut: entry.desktop_shortcut,
+            menu_entry: entry.menu_entry,
+            mime_types: mime_types.unwrap_or_default(),
+            exec_arg: exec_arg.unwrap_or_default(),
             mode,
             local_path: entry.local_path.display().to_string(),
             icon_path: entry
@@ -787,23 +1013,37 @@ impl ManagerApp {
                     display_name,
                     asset_name,
                     categories,
-                } => {
-                    self.start_install_from_repo(github_repo, display_name, asset_name, categories)
-                }
-                RetryAction::DownloadAndReplace { app_id, url, tag } => {
-                    self.start_update_download(app_id, url, tag)
-                }
+                    desktop_shortcut,
+                    menu_entry,
+                    mime_types,
+                    exec_arg,
+                } => self.start_install_from_repo(
+                    github_repo,
+                    display_name,
+                    asset_name,
+                    categories,
+                    desktop_shortcut,
+                    menu_entry,
+                    mime_types,
+                    exec_arg,
+                ),
+                RetryAction::DownloadAndReplace {
+                    app_id,
+                    url,
+                    tag,
+                    commit_hash,
+                } => self.start_update_download(app_id, url, tag, commit_hash),
             }
         }
     }
 
     pub(crate) fn app_download_state(&self, app_id: &str) -> AppDownloadState<'_> {
-        if let Some(op) = self
+        if self
             .ops
             .values()
-            .find(|op| op.app_id.as_deref() == Some(app_id))
+            .any(|op| op.app_id.as_deref() == Some(app_id))
         {
-            return AppDownloadState::Downloading(op);
+            return AppDownloadState::Downloading;
         }
         if let Some(failed) = self
             .failed_ops
@@ -834,19 +1074,13 @@ impl ManagerApp {
 
     pub(crate) fn open_add_to(&mut self, app: &AppEntry) {
         self.is_form_open = false;
+        self.show_settings = false;
         self.side_panel_form.clear();
-        let (desktop, menu) = match (xdg::desktop_dir(), xdg::applications_dir()) {
-            (Ok(d), Ok(a)) => (
-                desktop_entry::desktop_shortcut_path(app, &d).exists(),
-                desktop_entry::menu_entry_path(app, &a).exists(),
-            ),
-            _ => (false, false),
-        };
         self.add_to = Some(AddToState {
             app_id: app.id.clone(),
             app_name: app.display_name.clone(),
-            desktop,
-            menu,
+            desktop: app.desktop_shortcut,
+            menu: app.menu_entry,
         });
         self.status = None;
         self.show_side_panel = true;
@@ -854,6 +1088,102 @@ impl ManagerApp {
 
     pub(crate) fn close_add_to(&mut self) {
         self.add_to = None;
+    }
+
+    pub(crate) fn open_settings(&mut self) {
+        let (apps_dir, auto_check_updates, hub_start_menu, hub_category, hub_desktop) = self
+            .config
+            .lock()
+            .map(|cfg| {
+                (
+                    cfg.custom_download_dir
+                        .clone()
+                        .unwrap_or_else(xdg::default_managed_apps_dir)
+                        .display()
+                        .to_string(),
+                    cfg.auto_check_updates,
+                    cfg.hub_start_menu_shortcut,
+                    cfg.hub_start_menu_category.clone(),
+                    cfg.hub_desktop_shortcut,
+                )
+            })
+            .unwrap_or_else(|_| {
+                (
+                    xdg::default_managed_apps_dir().display().to_string(),
+                    true,
+                    true,
+                    "Utility".to_string(),
+                    false,
+                )
+            });
+        let github_token = crate::secrets::load_github_token()
+            .or_else(|| std::env::var("GITHUB_TOKEN").ok())
+            .or_else(|| std::env::var("GH_TOKEN").ok())
+            .unwrap_or_default();
+        self.settings_form = crate::ui::settings_panel::SettingsFormState {
+            apps_dir,
+            auto_check_updates,
+            hub_start_menu_shortcut: hub_start_menu,
+            hub_start_menu_category: hub_category,
+            hub_desktop_shortcut: hub_desktop,
+            github_token,
+            show_token: false,
+        };
+        self.is_form_open = false;
+        self.add_to = None;
+        self.show_settings = true;
+        self.show_side_panel = true;
+    }
+
+    pub(crate) fn save_settings(&mut self) {
+        let path = PathBuf::from(self.settings_form.apps_dir.trim());
+        if path.as_os_str().is_empty() {
+            self.status = Some("Choose an AppImage storage folder.".into());
+            return;
+        }
+        if let Err(e) = std::fs::create_dir_all(&path) {
+            self.status = Some(format!("failed to create storage folder: {e:#}"));
+            return;
+        }
+
+        let auto_check = self.settings_form.auto_check_updates;
+        let hub_menu = self.settings_form.hub_start_menu_shortcut;
+        let hub_category = self.settings_form.hub_start_menu_category.clone();
+        let hub_desktop = self.settings_form.hub_desktop_shortcut;
+        if let Ok(mut cfg) = self.config.lock() {
+            cfg.custom_download_dir = Some(path.clone());
+            cfg.auto_check_updates = auto_check;
+            cfg.hub_start_menu_shortcut = hub_menu;
+            cfg.hub_start_menu_category = hub_category.clone();
+            cfg.hub_desktop_shortcut = hub_desktop;
+            if let Err(e) = cfg.save() {
+                self.status = Some(format!("failed to save settings: {e:#}"));
+                return;
+            }
+        }
+        desktop_entry::sync_hub_shortcuts(hub_menu, hub_desktop, &hub_category);
+
+        let token = self.settings_form.github_token.trim().to_string();
+        if let Err(e) = crate::secrets::save_github_token(&token) {
+            self.status = Some(format!("failed to save GitHub token: {e:#}"));
+            return;
+        }
+        self.has_github_token = token_is_present(Some(&token));
+        self.send_cmd(BackendCommand::SetGithubToken(if token.is_empty() {
+            None
+        } else {
+            Some(token)
+        }));
+        let found = self.sync_metadata_files();
+        self.show_settings = false;
+        self.status = Some(if found > 0 {
+            format!(
+                "Settings saved. AppImages folder: {}. Found {found} existing app(s).",
+                path.display()
+            )
+        } else {
+            format!("Settings saved. AppImages folder: {}", path.display())
+        });
     }
 
     pub(crate) fn apply_add_to(&mut self) {
@@ -866,11 +1196,20 @@ impl ManagerApp {
                 .find(|a| a.id == state.app_id)
                 .cloned()
         });
-        let Some(entry) = entry else {
+        let Some(mut entry) = entry else {
             self.status = Some("Application not found".into());
             self.add_to = None;
             return;
         };
+        entry.desktop_shortcut = state.desktop;
+        entry.menu_entry = state.menu;
+        if let Ok(mut cfg) = self.config.lock() {
+            if let Some(stored) = cfg.applications.iter_mut().find(|a| a.id == state.app_id) {
+                stored.desktop_shortcut = state.desktop;
+                stored.menu_entry = state.menu;
+            }
+            let _ = cfg.save();
+        }
 
         let mut added: Vec<String> = Vec::new();
         let mut removed: Vec<String> = Vec::new();
@@ -946,24 +1285,13 @@ impl ManagerApp {
     }
 
     pub(crate) fn is_right_panel_open(&self) -> bool {
-        self.is_form_open || self.add_to.is_some()
+        self.is_form_open || self.add_to.is_some() || self.show_settings
     }
 
     fn render_top_bar(&mut self, ui: &mut egui::Ui, size_class: SizeClass) {
         let full_brand = "AppImage Hub";
         let show_actions_inline = matches!(size_class, SizeClass::Large);
         let tight = matches!(size_class, SizeClass::Tight);
-
-        let effective_download_dir = self
-            .config
-            .lock()
-            .ok()
-            .and_then(|c| c.custom_download_dir.clone())
-            .or_else(|| xdg::managed_apps_dir().ok());
-        let download_dir_text = effective_download_dir
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "unavailable".into());
 
         ui.horizontal(|ui| {
             ui.add(
@@ -990,19 +1318,12 @@ impl ManagerApp {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.render_toolbar_actions(ui, show_actions_inline, &download_dir_text);
+                self.render_toolbar_actions(ui, show_actions_inline);
             });
         });
-
-        // Breadcrumb row: painted folder icon + shortened download path.
-        if !tight {
-            ui.add_space(2.0);
-            crate::ui::theme::breadcrumb(ui, &download_dir_text, crate::ui::theme::ACCENT_HOVER)
-                .on_hover_text(format!("Download folder: {download_dir_text}"));
-        }
     }
 
-    fn render_toolbar_actions(&mut self, ui: &mut egui::Ui, inline: bool, download_dir_text: &str) {
+    fn render_toolbar_actions(&mut self, ui: &mut egui::Ui, inline: bool) {
         if inline {
             // Primary "Add" action: neon pill with a hover glow.
             let add = ui.add(crate::ui::theme::add_button("+ Add AppImage"));
@@ -1050,53 +1371,52 @@ impl ManagerApp {
                 self.check_all_updates();
             }
 
-            ui.add_space(4.0);
-            let browse_clicked = ui
-                .add(crate::ui::theme::secondary_button("Browse"))
-                .on_hover_text("Choose custom download folder for GitHub installs")
+            if self.hub_update_url.is_some() || self.hub_update_progress.is_some() {
+                let hub_progress = self.hub_update_progress;
+                let hub_enabled = hub_progress.is_none();
+                let hub_clicked = progress_button(
+                    ui,
+                    "Update Hub",
+                    "Updating Hub…",
+                    hub_progress,
+                    hub_enabled,
+                    152.0,
+                )
                 .clicked();
-            if browse_clicked {
-                if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                    if let Ok(mut cfg) = self.config.lock() {
-                        cfg.custom_download_dir = Some(p);
-                        let _ = cfg.save();
-                    }
-                    let found = self.sync_metadata_files();
-                    if found > 0 {
-                        self.status = Some(format!(
-                            "Found {found} existing app(s) in the selected folder."
-                        ));
-                    }
+                if hub_clicked && hub_enabled {
+                    self.start_hub_update();
                 }
+            }
+
+            ui.add_space(4.0);
+            if ui
+                .add(crate::ui::theme::secondary_button("Settings"))
+                .on_hover_text("Storage, updates, and GitHub API settings")
+                .clicked()
+            {
+                self.open_settings();
             }
         } else {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add(crate::ui::theme::add_button("+ Add")).clicked() {
                     self.open_add_form();
                 }
+                if ui
+                    .add(crate::ui::theme::secondary_button("Settings"))
+                    .on_hover_text("Storage, updates, and GitHub API settings")
+                    .clicked()
+                {
+                    self.open_settings();
+                }
                 ui.menu_button("Actions", |ui| {
-                    ui.label(crate::ui::theme::secondary_label("Download folder:").small());
-                    ui.add(
-                        egui::Label::new(crate::ui::theme::muted_label(download_dir_text))
-                            .truncate(),
-                    )
-                    .on_hover_text(download_dir_text);
-                    ui.separator();
-                    let browse_clicked = ui.button("Browse download folder").clicked();
-                    if browse_clicked {
-                        if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                            if let Ok(mut cfg) = self.config.lock() {
-                                cfg.custom_download_dir = Some(p);
-                                let _ = cfg.save();
-                            }
-                            let found = self.sync_metadata_files();
-                            if found > 0 {
-                                self.status = Some(format!(
-                                    "Found {found} existing app(s) in the selected folder."
-                                ));
-                            }
+                    if self.hub_update_url.is_some() {
+                        if self.hub_update_progress.is_some() {
+                            ui.add_enabled(false, egui::Button::new("Updating Hub…"));
+                        } else if ui.button("Update Hub").clicked() {
+                            self.start_hub_update();
+                            ui.close_menu();
                         }
-                        ui.close_menu();
+                        ui.separator();
                     }
 
                     let checking = self.update_check.is_some();
@@ -1135,16 +1455,60 @@ impl ManagerApp {
         }
     }
 
+    fn check_hub_update_if_allowed(&mut self) {
+        let now = now_unix();
+        let cooldown = self.update_check_cooldown();
+        let allowed = if let Ok(mut cfg) = self.config.lock() {
+            if update_check_cooldown_remaining(cfg.last_hub_update_check, now, cooldown).is_some() {
+                false
+            } else {
+                cfg.last_hub_update_check = Some(now);
+                let _ = cfg.save();
+                true
+            }
+        } else {
+            false
+        };
+        if allowed {
+            self.send_cmd(BackendCommand::CheckHubUpdate);
+        }
+    }
+
+    fn start_hub_update(&mut self) {
+        let Some(url) = self.hub_update_url.clone() else {
+            return;
+        };
+        let Some(target) = current_appimage_path() else {
+            self.status = Some("Cannot determine the running AppImage path.".into());
+            return;
+        };
+        self.hub_update_progress = Some(0.0);
+        self.send_cmd(BackendCommand::SelfUpdate {
+            url,
+            target,
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+    }
+
     pub(crate) fn check_all_updates(&mut self) {
         if self.update_check.is_some() {
             return;
         }
 
-        let ids: Vec<String> = self
-            .config
-            .lock()
-            .map(|c| {
-                c.applications
+        let now = now_unix();
+        let cooldown = self.update_check_cooldown();
+        let (ids, rate_limited) = {
+            let Ok(mut cfg) = self.config.lock() else {
+                self.status = Some("Could not access update settings.".into());
+                return;
+            };
+            if let Some(remaining) =
+                update_check_cooldown_remaining(cfg.last_update_check, now, cooldown)
+            {
+                (Vec::new(), Some(remaining))
+            } else {
+                let ids = cfg
+                    .applications
                     .iter()
                     .filter(|a| {
                         matches!(
@@ -1153,9 +1517,24 @@ impl ManagerApp {
                         )
                     })
                     .map(|a| a.id.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
+                    .collect::<Vec<_>>();
+                if !ids.is_empty() {
+                    cfg.last_update_check = Some(now);
+                    let _ = cfg.save();
+                }
+                (ids, None)
+            }
+        };
+
+        if let Some(remaining) = rate_limited {
+            self.status = Some(format!(
+                "Update checks are limited to once every {} minutes. Try again in {}m {}s.",
+                cooldown / 60,
+                remaining / 60,
+                remaining % 60
+            ));
+            return;
+        }
 
         if ids.is_empty() {
             self.status = Some("No GitHub-tracked apps to check.".into());
@@ -1183,14 +1562,20 @@ impl ManagerApp {
         if !self.ops.is_empty() {
             return;
         }
-        let updates: Vec<(String, String, String)> = self
+        let updates: Vec<(String, AvailableUpdate)> = self
             .update_available
             .iter()
-            .map(|(app_id, (tag, url, _asset))| (app_id.clone(), tag.clone(), url.clone()))
+            .map(|(app_id, update)| (app_id.clone(), update.clone()))
             .collect();
-        for (app_id, tag, url) in updates {
-            self.start_update_download(app_id, url, tag);
+        for (app_id, update) in updates {
+            self.start_update_download(app_id, update.url, update.tag, update.commit_hash);
         }
+    }
+
+    /// Rate limit between manual update checks: shorter when a GitHub token is
+    /// configured (the authenticated API quota is much larger).
+    pub(crate) fn update_check_cooldown(&self) -> u64 {
+        update_check_cooldown_secs(self.has_github_token)
     }
 
     /// Whether automatic update checks on startup are enabled (persisted in config).
@@ -1199,16 +1584,6 @@ impl ManagerApp {
             .lock()
             .map(|c| c.auto_check_updates)
             .unwrap_or(true)
-    }
-
-    /// Persist the auto-check toggle (a failed config save must never break the UI).
-    pub(crate) fn set_auto_check_enabled(&mut self, enabled: bool) {
-        if let Ok(mut cfg) = self.config.lock() {
-            if cfg.auto_check_updates != enabled {
-                cfg.auto_check_updates = enabled;
-                let _ = cfg.save();
-            }
-        }
     }
 
     pub(crate) fn auto_populate_from_appimage(&mut self, appimage_path: &Path) {
@@ -1261,6 +1636,17 @@ impl ManagerApp {
             if let Some(icon_p) = meta.icon_path {
                 self.side_panel_form.icon_path = icon_p.display().to_string();
             }
+
+            if self.side_panel_form.mime_types.trim().is_empty() {
+                if let Some(mime_types) = meta.mime_types {
+                    self.side_panel_form.mime_types = mime_types;
+                }
+            }
+            if self.side_panel_form.exec_arg.trim().is_empty() {
+                if let Some(exec_arg) = meta.exec_arg {
+                    self.side_panel_form.exec_arg = exec_arg;
+                }
+            }
         }
     }
 
@@ -1297,6 +1683,17 @@ impl ManagerApp {
         }
 
         self.side_panel_form.startup_notify = meta.startup_notify;
+
+        if self.side_panel_form.mime_types.trim().is_empty() {
+            if let Some(mime_types) = &meta.mime_types {
+                self.side_panel_form.mime_types = mime_types.clone();
+            }
+        }
+        if self.side_panel_form.exec_arg.trim().is_empty() {
+            if let Some(exec_arg) = &meta.exec_arg {
+                self.side_panel_form.exec_arg = exec_arg.clone();
+            }
+        }
 
         if self.side_panel_form.launch_args.trim().is_empty() && !meta.args.is_empty() {
             self.side_panel_form.launch_args = meta.args.join(" ");
@@ -1373,7 +1770,7 @@ impl ManagerApp {
         }
 
         for app in apps_to_rewrite {
-            let _ = write_desktop(&app);
+            refresh_existing_shortcuts(&app);
         }
     }
 
@@ -1431,13 +1828,14 @@ impl ManagerApp {
             for (id, new_path) in &moved {
                 if let Some(entry) = cfg.applications.iter_mut().find(|a| &a.id == id) {
                     entry.local_path = new_path.clone();
+                    entry.file_fingerprint = crate::config::file_fingerprint(new_path);
                     rewritten.push(entry.clone());
                 }
             }
             let _ = cfg.save();
         }
         for entry in &rewritten {
-            let _ = write_desktop(entry);
+            refresh_existing_shortcuts(entry);
             let _ = appmeta::write_for_entry(entry);
         }
     }
@@ -1481,11 +1879,14 @@ impl ManagerApp {
             if known_paths.contains(&appimage) {
                 continue;
             }
-            let entry = if let Some(meta) = appmeta::read_for_appimage(&appimage) {
+            let mut entry = if let Some(meta) = appmeta::read_for_appimage(&appimage) {
                 meta.to_entry(appimage.clone())
             } else {
                 app_entry_from_appimage(&appimage)
             };
+            // Never trust a sidecar's fingerprint for a file we are adopting
+            // now: baseline whatever is actually on disk.
+            entry.file_fingerprint = crate::config::file_fingerprint(&appimage);
             if known_ids.contains(&entry.id) {
                 continue;
             }
@@ -1502,7 +1903,9 @@ impl ManagerApp {
             let _ = cfg.save();
         }
         for entry in &adopted {
-            let _ = write_desktop(entry);
+            // Scanning a folder must not create shortcuts by itself. Only
+            // update entries the user has already chosen to create.
+            refresh_existing_shortcuts(entry);
             let _ = appmeta::write_for_entry(entry);
         }
         adopted.len()
@@ -1510,6 +1913,31 @@ impl ManagerApp {
 
     pub(crate) fn updates_available_count(&self) -> usize {
         self.update_available.len()
+    }
+
+    /// Recomputes offline file issues (missing/changed AppImages) for every
+    /// app. Cheap: metadata only, no content hashing.
+    pub(crate) fn refresh_file_issues(&mut self) {
+        let apps = self
+            .config
+            .lock()
+            .map(|cfg| cfg.applications.clone())
+            .unwrap_or_default();
+        let mut issues = HashMap::new();
+        for app in &apps {
+            if let Some(issue) = cheap_local_file_issue(app) {
+                issues.insert(app.id.clone(), issue);
+            }
+        }
+        self.file_issues = issues;
+    }
+
+    /// Clears a "changed on disk" warning by accepting the current file as the
+    /// new baseline. Runs in the backend so hashing does not block the UI.
+    pub(crate) fn accept_current_file(&mut self, app_id: &str) {
+        self.send_cmd(BackendCommand::AcceptCurrentFile {
+            app_id: app_id.to_string(),
+        });
     }
 
     pub(crate) fn submit_side_panel_form(&mut self) {
@@ -1549,6 +1977,16 @@ impl ManagerApp {
         };
         let categories = submitted_categories(&form);
         let startup_notify = form.startup_notify;
+        let desktop_shortcut = form.desktop_shortcut;
+        let menu_entry = form.menu_entry;
+        let mime_types = {
+            let value = form.mime_types.trim();
+            (!value.is_empty()).then(|| value.to_string())
+        };
+        let exec_arg = {
+            let value = form.exec_arg.trim();
+            (!value.is_empty()).then(|| value.to_string())
+        };
         let asset_preference =
             if form.asset_selection_mode == crate::ui::side_panel::AssetSelectionMode::Manual {
                 form.manual_asset.clone()
@@ -1567,6 +2005,10 @@ impl ManagerApp {
                     e.comment = comment;
                     e.categories = categories;
                     e.startup_notify = startup_notify;
+                    e.desktop_shortcut = desktop_shortcut;
+                    e.menu_entry = menu_entry;
+                    e.mime_types = mime_types.clone();
+                    e.exec_arg = exec_arg.clone();
                     e.args = args;
                     e.asset_preference = asset_preference;
                     if let Some(folder) = e.local_path.parent() {
@@ -1603,7 +2045,7 @@ impl ManagerApp {
                 if let (Ok(d), Ok(a)) = (xdg::desktop_dir(), xdg::applications_dir()) {
                     let _ = desktop_entry::remove_entry(&old, &d, &a);
                 }
-                if let Err(e) = write_desktop(&e) {
+                if let Err(e) = apply_app_shortcuts(&e) {
                     self.status = Some(format!("Saved, but menu entry failed: {e:#}"));
                     self.is_form_open = false;
                     self.side_panel_form.clear();
@@ -1661,12 +2103,18 @@ impl ManagerApp {
                     icon_path: final_icon_path,
                     asset_preference: None,
                     added_at: Some(now_unix()),
+                    commit_hash: None,
+                    file_fingerprint: crate::config::file_fingerprint(&managed_path),
+                    desktop_shortcut,
+                    menu_entry,
+                    mime_types: mime_types.clone(),
+                    exec_arg: exec_arg.clone(),
                 };
                 if let Err(e) = permissions::set_executable(&managed_path) {
                     self.status = Some(format!("chmod failed: {e:#}"));
                     return;
                 }
-                if let Err(e) = write_desktop(&entry) {
+                if let Err(e) = apply_app_shortcuts(&entry) {
                     self.status = Some(format!("desktop entry failed: {e:#}"));
                     return;
                 }
@@ -1718,12 +2166,18 @@ impl ManagerApp {
                     icon_path: final_icon_path,
                     asset_preference,
                     added_at: Some(now_unix()),
+                    commit_hash: None,
+                    file_fingerprint: crate::config::file_fingerprint(&managed_path),
+                    desktop_shortcut,
+                    menu_entry,
+                    mime_types: mime_types.clone(),
+                    exec_arg: exec_arg.clone(),
                 };
                 if let Err(e) = permissions::set_executable(&managed_path) {
                     self.status = Some(format!("chmod failed: {e:#}"));
                     return;
                 }
-                if let Err(e) = write_desktop(&entry) {
+                if let Err(e) = apply_app_shortcuts(&entry) {
                     self.status = Some(format!("desktop entry failed: {e:#}"));
                     return;
                 }
@@ -1741,6 +2195,10 @@ impl ManagerApp {
                     display_name,
                     asset_preference,
                     categories,
+                    desktop_shortcut,
+                    menu_entry,
+                    mime_types,
+                    exec_arg,
                 );
             }
         }
@@ -1762,8 +2220,22 @@ impl eframe::App for ManagerApp {
             return;
         }
         let size_class = SizeClass::from_width(ctx.screen_rect().width());
+        let mut had_events = false;
         while let Ok(evt) = self.evt_rx.try_recv() {
+            had_events = true;
             self.apply_event(evt);
+        }
+        if had_events {
+            self.refresh_file_issues();
+        }
+        // Poll local file state once a second so a replaced/deleted AppImage is
+        // flagged even without a GitHub check.
+        if self
+            .last_file_scan
+            .is_none_or(|scan| scan.elapsed() >= Duration::from_secs(1))
+        {
+            self.last_file_scan = Some(Instant::now());
+            self.refresh_file_issues();
         }
         self.tick_update_check(ctx);
 
@@ -1773,6 +2245,11 @@ impl eframe::App for ManagerApp {
             if self.auto_check_enabled() {
                 self.check_all_updates();
             }
+        }
+
+        if !self.hub_update_check_started {
+            self.hub_update_check_started = true;
+            self.check_hub_update_if_allowed();
         }
 
         egui::TopBottomPanel::top("toolbar")
@@ -1827,7 +2304,9 @@ impl eframe::App for ManagerApp {
                 .width_range(min_panel..=max_panel)
                 .frame(egui::Frame::NONE.fill(crate::ui::theme::BG))
                 .show(ctx, |ui| {
-                    if self.add_to.is_some() {
+                    if self.show_settings {
+                        crate::ui::settings_panel::render(ui, self);
+                    } else if self.add_to.is_some() {
                         crate::ui::side_panel::render_add_to(ui, self, size_class);
                     } else if self.is_form_open {
                         crate::ui::side_panel::render(ui, self, size_class);
@@ -1870,7 +2349,9 @@ impl eframe::App for ManagerApp {
                                     crate::ui::theme::RADIUS_LG,
                                 ))
                                 .show(ui, |ui| {
-                                    if self.add_to.is_some() {
+                                    if self.show_settings {
+                                        crate::ui::settings_panel::render(ui, self);
+                                    } else if self.add_to.is_some() {
                                         crate::ui::side_panel::render_add_to(ui, self, size_class);
                                     } else if self.is_form_open {
                                         crate::ui::side_panel::render(ui, self, size_class);
@@ -1889,25 +2370,90 @@ impl eframe::App for ManagerApp {
 
         crate::ui::confirm_dialog::render(ctx, self);
 
+        // Bottom-panel heights are cached by egui for one frame. Whenever the
+        // progress list changes height (a download starts or finishes), the
+        // frame that reflects the change lays the footer out against the old
+        // height, leaving an unpainted gap. Requesting one extra frame
+        // re-anchors the footer at the window bottom immediately instead of
+        // leaving a blank block until the next input event.
+        let activity_items = self.ops.len() + self.failed_ops.len();
+        if activity_items != self.activity_footer_items {
+            self.activity_footer_items = activity_items;
+            ctx.request_repaint();
+        }
+
         if !self.ops.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
-        if self.update_check.is_some() {
+        if self.update_check.is_some() || self.hub_update_progress.is_some() {
             // Keep the progress animation at display refresh rate.
             ctx.request_repaint();
         }
+        // Wake up once a second so the offline file scan notices AppImages
+        // replaced or deleted while the window is otherwise idle.
+        ctx.request_repaint_after(Duration::from_secs(1));
     }
 }
 
+fn current_appimage_path() -> Option<PathBuf> {
+    std::env::var_os("APPIMAGE")
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
+        .or_else(|| std::env::current_exe().ok())
+}
+
+fn hub_update_is_available(remote_commit: &str, remote_tag: &str) -> bool {
+    hub_update_available_with(
+        env!("APPIMAGE_HUB_COMMIT"),
+        remote_commit,
+        env!("CARGO_PKG_VERSION"),
+        remote_tag,
+    )
+}
+
+fn hub_update_available_with(
+    local_commit: &str,
+    remote_commit: &str,
+    current_version: &str,
+    remote_tag: &str,
+) -> bool {
+    let local_commit = local_commit.trim();
+    if !local_commit.is_empty() {
+        return !local_commit.eq_ignore_ascii_case(remote_commit.trim());
+    }
+
+    // Source builds without git metadata fall back to the package version.
+    let remote = remote_tag.trim().trim_start_matches('v');
+    remote != current_version.trim()
+}
+
 fn check_updates_button(ui: &mut egui::Ui, progress: Option<f32>, enabled: bool) -> egui::Response {
+    progress_button(
+        ui,
+        "Check All Updates",
+        "Checking updates…",
+        progress,
+        enabled,
+        176.0,
+    )
+}
+
+fn progress_button(
+    ui: &mut egui::Ui,
+    idle_label: &str,
+    active_label: &str,
+    progress: Option<f32>,
+    enabled: bool,
+    width: f32,
+) -> egui::Response {
     let text = match progress {
         Some(fraction) => format!(
-            "Checking updates… {}%",
+            "{active_label} {}%",
             (fraction.clamp(0.0, 1.0) * 100.0).round() as i32
         ),
-        None => "Check All Updates".to_string(),
+        None => idle_label.to_string(),
     };
-    let desired = egui::vec2(176.0, ui.spacing().interact_size.y.max(32.0));
+    let desired = egui::vec2(width, ui.spacing().interact_size.y.max(32.0));
     let sense = if enabled {
         egui::Sense::click()
     } else {
@@ -2056,13 +2602,46 @@ fn app_entry_from_appimage(path: &Path) -> AppEntry {
                 .map(|duration| duration.as_secs() as i64)
                 .unwrap_or_else(now_unix),
         ),
+        commit_hash: None,
+        file_fingerprint: crate::config::file_fingerprint(path),
+        desktop_shortcut: true,
+        menu_entry: true,
+        mime_types: None,
+        exec_arg: None,
     }
 }
 
-fn write_desktop(entry: &AppEntry) -> anyhow::Result<()> {
+fn apply_app_shortcuts(entry: &AppEntry) -> anyhow::Result<()> {
     let desktop = xdg::desktop_dir()?;
     let apps = xdg::applications_dir()?;
-    desktop_entry::write_entry(entry, &desktop, &apps)
+    if entry.desktop_shortcut {
+        desktop_entry::write_desktop_shortcut(entry, &desktop)?;
+    } else {
+        let _ = desktop_entry::remove_desktop_shortcut(entry, &desktop);
+    }
+    if entry.menu_entry {
+        desktop_entry::write_menu_entry(entry, &apps)?;
+    } else {
+        let _ = desktop_entry::remove_menu_entry(entry, &apps);
+    }
+    Ok(())
+}
+
+/// Refresh desktop/menu entries only when they already exist. Used by update,
+/// migration, and folder-scan paths so they never create new shortcuts.
+fn refresh_existing_shortcuts(entry: &AppEntry) {
+    if let Ok(desktop_dir) = xdg::desktop_dir() {
+        let path = desktop_entry::desktop_shortcut_path(entry, &desktop_dir);
+        if path.exists() {
+            let _ = desktop_entry::write_desktop_shortcut(entry, &desktop_dir);
+        }
+    }
+    if let Ok(apps_dir) = xdg::applications_dir() {
+        let path = desktop_entry::menu_entry_path(entry, &apps_dir);
+        if path.exists() {
+            let _ = desktop_entry::write_menu_entry(entry, &apps_dir);
+        }
+    }
 }
 
 fn ensure_in_managed_folder(
@@ -2108,10 +2687,20 @@ fn clean_managed_path(local_path: &Path, display_name: &str) -> Option<PathBuf> 
     }
 }
 
+fn build_github_client(token: Option<&str>) -> octocrab::Result<octocrab::Octocrab> {
+    match token.map(str::trim).filter(|token| !token.is_empty()) {
+        Some(token) => octocrab::Octocrab::builder()
+            .personal_token(token.to_string())
+            .build(),
+        None => octocrab::Octocrab::builder().build(),
+    }
+}
+
 fn spawn_backend(
     config: Arc<Mutex<Config>>,
     mut cmd_rx: mpsc::Receiver<BackendCommand>,
     evt_tx: mpsc::Sender<BackendEvent>,
+    stored_github_token: Option<String>,
 ) {
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -2121,7 +2710,13 @@ fn spawn_backend(
             return;
         };
         rt.block_on(async move {
-            let octo = match octocrab::Octocrab::builder().build() {
+            let initial_token = stored_github_token.or_else(|| {
+                std::env::var("GITHUB_TOKEN")
+                    .ok()
+                    .or_else(|| std::env::var("GH_TOKEN").ok())
+                    .filter(|token| !token.trim().is_empty())
+            });
+            let mut octo = match build_github_client(initial_token.as_deref()) {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = evt_tx
@@ -2151,8 +2746,119 @@ fn spawn_backend(
                 }
             };
 
+            // Multiple apps can share one repository. Cache release lookups for
+            // the same rate-limit window (2 min with a token, 5 min without) so
+            // a batch check costs one request per unique repo instead of one per
+            // app.
+            let mut release_cache_ttl = Duration::from_secs(update_check_cooldown_secs(
+                token_is_present(initial_token.as_deref()),
+            ));
+            let mut release_cache: HashMap<String, (Instant, github::ReleaseInfo)> = HashMap::new();
+
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
+                    BackendCommand::SetGithubToken(token) => {
+                        release_cache_ttl =
+                            Duration::from_secs(update_check_cooldown_secs(token_is_present(
+                                token.as_deref(),
+                            )));
+                        match build_github_client(token.as_deref()) {
+                            Ok(client) => octo = client,
+                            Err(e) => {
+                                let _ = evt_tx
+                                    .send(BackendEvent::Error {
+                                        op_id: None,
+                                        app_id: None,
+                                        message: format!("failed to update GitHub client: {e}"),
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
+                    BackendCommand::CheckHubUpdate => {
+                        match github::fetch_latest_release_with_selector(
+                            &octo,
+                            "MichaelX17/AppImage-Hub",
+                            None,
+                        )
+                        .await
+                        {
+                            Ok(info) => {
+                                if hub_update_is_available(&info.commit_hash, &info.tag) {
+                                    let _ = evt_tx
+                                        .send(BackendEvent::HubUpdateAvailable {
+                                            url: info.download_url,
+                                        })
+                                        .await;
+                                } else {
+                                    let _ = evt_tx.send(BackendEvent::HubUpToDate).await;
+                                }
+                            }
+                            Err(e) => {
+                                let _ = evt_tx
+                                    .send(BackendEvent::HubUpdateFailed {
+                                        message: format!("{e:#}"),
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
+                    BackendCommand::SelfUpdate {
+                        url,
+                        target,
+                        cancel,
+                    } => {
+                        let temp = downloader::temp_path_for(&target);
+                        let progress_tx = evt_tx.clone();
+                        let result = downloader::download_to_path_with_progress(
+                            &http,
+                            &url,
+                            &temp,
+                            cancel,
+                            move |progress| {
+                                let _ = progress_tx.try_send(
+                                    BackendEvent::HubUpdateProgress {
+                                        fraction: progress.fraction,
+                                        downloaded: progress.downloaded,
+                                        total: progress.total,
+                                    },
+                                );
+                            },
+                        )
+                        .await;
+
+                        match result {
+                            Ok(()) => {
+                                if let Err(e) = permissions::set_executable(&temp) {
+                                    let _ = std::fs::remove_file(&temp);
+                                    let _ = evt_tx
+                                        .send(BackendEvent::HubUpdateFailed {
+                                            message: format!("chmod failed: {e:#}"),
+                                        })
+                                        .await;
+                                    continue;
+                                }
+                                if let Err(e) = downloader::atomic_replace(&temp, &target) {
+                                    let _ = std::fs::remove_file(&temp);
+                                    let _ = evt_tx
+                                        .send(BackendEvent::HubUpdateFailed {
+                                            message: format!("replace failed: {e:#}"),
+                                        })
+                                        .await;
+                                    continue;
+                                }
+                                let _ = evt_tx.send(BackendEvent::HubUpdateReady).await;
+                            }
+                            Err(e) => {
+                                let _ = std::fs::remove_file(&temp);
+                                let _ = evt_tx
+                                    .send(BackendEvent::HubUpdateFailed {
+                                        message: format!("{e:#}"),
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
                     BackendCommand::CheckUpdate { app_id } => {
                         let cfg = config.lock().ok().map(|c| c.clone());
                         if let Some(cfg) = cfg {
@@ -2167,17 +2873,66 @@ fn spawn_backend(
                                     AppSource::LocalOnly => None,
                                 };
                                 if let Some(repo) = repo {
-                                    match github::fetch_latest_release_with_selector(
-                                        &octo,
-                                        &repo,
-                                        entry.asset_preference.as_deref(),
-                                    )
-                                    .await
-                                    {
+                                    let cache_key = repo.trim().to_lowercase();
+                                    let now = Instant::now();
+                                    let cached = release_cache.get(&cache_key).and_then(
+                                        |(fetched_at, info)| {
+                                            (now.duration_since(*fetched_at) < release_cache_ttl)
+                                                .then(|| info.clone())
+                                        },
+                                    );
+                                    let release = match cached {
+                                        Some(info) => Ok(info),
+                                        None => github::fetch_latest_release_with_selector(
+                                            &octo,
+                                            &repo,
+                                            entry.asset_preference.as_deref(),
+                                        )
+                                        .await
+                                        .inspect(|info| {
+                                            release_cache.insert(
+                                                cache_key,
+                                                (now, info.clone()),
+                                            );
+                                        }),
+                                    };
+                                    match release {
                                         Ok(info) => {
-                                            if !entry.current_version.is_empty()
-                                                && info.tag == entry.current_version
-                                            {
+                                            // Confirm the file state off the
+                                            // async runtime: this may hash a
+                                            // large AppImage when the cheap
+                                            // size/mtime metadata changed.
+                                            let status_entry = entry.clone();
+                                            let local_issue = tokio::task::spawn_blocking(
+                                                move || verified_local_file_issue(&status_entry),
+                                            )
+                                            .await
+                                            .unwrap_or(None);
+
+                                            if local_issue.is_none() {
+                                                let baseline_entry = entry.clone();
+                                                let baseline = tokio::task::spawn_blocking(
+                                                    move || baseline_fingerprint(&baseline_entry),
+                                                )
+                                                .await
+                                                .ok()
+                                                .flatten();
+                                                if let Some(fingerprint) = baseline {
+                                                    persist_baseline_fingerprint(
+                                                        &config,
+                                                        &entry.id,
+                                                        fingerprint,
+                                                        false,
+                                                    );
+                                                }
+                                            }
+
+                                            let commit_changed = is_update_available(
+                                                Some(entry.commit_hash.as_deref().unwrap_or_default()),
+                                                &info.commit_hash,
+                                            );
+
+                                            if local_issue.is_none() && !commit_changed {
                                                 let _ = evt_tx
                                                     .send(BackendEvent::UpToDate {
                                                         app_id,
@@ -2190,7 +2945,7 @@ fn spawn_backend(
                                                         app_id,
                                                         tag: info.tag,
                                                         url: info.download_url,
-                                                        asset_name: info.asset_name,
+                                                        commit_hash: info.commit_hash,
                                                     })
                                                     .await;
                                             }
@@ -2214,6 +2969,7 @@ fn spawn_backend(
                         app_id,
                         url,
                         tag,
+                        commit_hash,
                         cancel,
                         ..
                     } => {
@@ -2281,12 +3037,24 @@ fn spawn_backend(
                                             .await;
                                         continue;
                                     }
+                                    let hash_target = target.clone();
+                                    let downloaded_fingerprint = tokio::task::spawn_blocking(
+                                        move || {
+                                            crate::config::file_fingerprint_with_hash(&hash_target)
+                                        },
+                                    )
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .or_else(|| crate::config::file_fingerprint(&target));
                                     let mut updated_entry: Option<AppEntry> = None;
                                     if let Ok(mut cfg) = config.lock() {
                                         if let Some(entry) =
                                             cfg.applications.iter_mut().find(|a| a.id == app_id)
                                         {
                                             entry.current_version = tag.clone();
+                                            entry.commit_hash = Some(commit_hash.clone());
+                                            entry.file_fingerprint = downloaded_fingerprint;
                                             if entry
                                                 .icon_path
                                                 .as_ref()
@@ -2306,15 +3074,9 @@ fn spawn_backend(
                                         let _ = cfg.save();
                                     }
                                     if let Some(entry) = updated_entry {
-                                        if let Err(e) = write_desktop(&entry) {
-                                            let _ = evt_tx
-                                                .send(BackendEvent::Error {
-                                                    op_id: Some(op_id.clone()),
-                                                    app_id: Some(app_id.clone()),
-                                                    message: format!("menu entry failed: {e:#}"),
-                                                })
-                                                .await;
-                                        }
+                                        // Updates only refresh shortcuts that
+                                        // already exist; they never create new ones.
+                                        refresh_existing_shortcuts(&entry);
                                         let _ = appmeta::write_for_entry(&entry);
                                     }
                                     let _ = evt_tx
@@ -2357,6 +3119,10 @@ fn spawn_backend(
                         display_name,
                         asset_name,
                         categories,
+                        desktop_shortcut,
+                        menu_entry,
+                        mime_types,
+                        exec_arg,
                         cancel,
                     } => {
                         let label = if display_name.trim().is_empty() {
@@ -2453,6 +3219,20 @@ fn spawn_backend(
                                                     (icon, meta)
                                                 };
 
+                                                let hash_target = target.clone();
+                                                let installed_fingerprint = tokio::task::spawn_blocking(
+                                                    move || {
+                                                        crate::config::file_fingerprint_with_hash(
+                                                            &hash_target,
+                                                        )
+                                                    },
+                                                )
+                                                .await
+                                                .ok()
+                                                .flatten()
+                                                .or_else(|| {
+                                                    crate::config::file_fingerprint(&target)
+                                                });
                                                 let entry = AppEntry {
                                                     id: install_id.clone(),
                                                     display_name: if display_name.trim().is_empty()
@@ -2485,9 +3265,23 @@ fn spawn_backend(
                                                     icon_path: extracted_icon,
                                                     asset_preference: asset_name,
                                                     added_at: Some(now_unix()),
+                                                    commit_hash: Some(info.commit_hash),
+                                                    file_fingerprint: installed_fingerprint,
+                                                    desktop_shortcut,
+                                                    menu_entry,
+                                                    mime_types: mime_types.or_else(|| {
+                                                        app_meta
+                                                            .as_ref()
+                                                            .and_then(|m| m.mime_types.clone())
+                                                    }),
+                                                    exec_arg: exec_arg.or_else(|| {
+                                                        app_meta
+                                                            .as_ref()
+                                                            .and_then(|m| m.exec_arg.clone())
+                                                    }),
                                                 };
                                                 let mut desktop_err: Option<String> = None;
-                                                if let Err(e) = write_desktop(&entry) {
+                                                if let Err(e) = apply_app_shortcuts(&entry) {
                                                     desktop_err = Some(format!("{e:#}"));
                                                 }
                                                 // Persist the metadata beside the AppImage.
@@ -2575,6 +3369,61 @@ fn spawn_backend(
                             }
                         }
                     }
+                    BackendCommand::AcceptCurrentFile { app_id } => {
+                        let entry = config
+                            .lock()
+                            .ok()
+                            .and_then(|c| c.applications.iter().find(|a| a.id == app_id).cloned());
+                        let Some(entry) = entry else {
+                            let _ = evt_tx
+                                .send(BackendEvent::FileAccepted {
+                                    app_id,
+                                    error: Some("app not found".into()),
+                                })
+                                .await;
+                            continue;
+                        };
+                        if !entry.local_path.exists() {
+                            let _ = evt_tx
+                                .send(BackendEvent::FileAccepted {
+                                    app_id,
+                                    error: Some("AppImage file is missing".into()),
+                                })
+                                .await;
+                            continue;
+                        }
+                        let path = entry.local_path.clone();
+                        let fingerprint = tokio::task::spawn_blocking(move || {
+                            crate::config::file_fingerprint_with_hash(&path)
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                        match fingerprint {
+                            Some(fingerprint) => {
+                                let stored = persist_baseline_fingerprint(
+                                    &config,
+                                    &app_id,
+                                    fingerprint,
+                                    true,
+                                );
+                                let _ = evt_tx
+                                    .send(BackendEvent::FileAccepted {
+                                        app_id,
+                                        error: (!stored).then(|| "app not found".to_string()),
+                                    })
+                                    .await;
+                            }
+                            None => {
+                                let _ = evt_tx
+                                    .send(BackendEvent::FileAccepted {
+                                        app_id,
+                                        error: Some("failed to read the AppImage file".into()),
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
                     BackendCommand::Launch { app_id } => {
                         let entry = config
                             .lock()
@@ -2590,6 +3439,131 @@ fn spawn_backend(
             }
         });
     });
+}
+
+/// Commit-hash-only update comparison. A missing local hash means the release
+/// must be installed once to establish a baseline.
+fn is_update_available(installed_commit: Option<&str>, remote_commit: &str) -> bool {
+    let Some(installed) = installed_commit.map(str::trim).filter(|c| !c.is_empty()) else {
+        return true;
+    };
+    !installed.eq_ignore_ascii_case(remote_commit.trim())
+}
+
+/// AppImage Hub always writes the sidecar after touching the binary, so an
+/// AppImage strictly newer than its sidecar was written by someone else.
+fn sidecar_is_older_than_file(entry: &AppEntry, current: &crate::config::FileFingerprint) -> bool {
+    let sidecar = appmeta::sidecar_path(&entry.local_path);
+    sidecar
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|mtime| current.mtime > mtime.as_secs() as i64)
+        .unwrap_or(false)
+}
+
+/// Cheap local check (metadata only, no hashing) used by the periodic UI scan.
+fn cheap_local_file_issue(entry: &AppEntry) -> Option<LocalFileIssue> {
+    let Some(current) = crate::config::file_fingerprint(&entry.local_path) else {
+        return Some(LocalFileIssue::Missing);
+    };
+    match entry.file_fingerprint.as_ref() {
+        Some(stored) if stored.size == current.size && stored.mtime == current.mtime => None,
+        Some(_) => Some(LocalFileIssue::Changed),
+        None => sidecar_is_older_than_file(entry, &current).then_some(LocalFileIssue::Changed),
+    }
+}
+
+/// Verified local check used by update checks.
+///
+/// When the cheap metadata differs but a stored SHA-256 exists, the file is
+/// hashed before flagging it: touch/copy/backup operations that preserve the
+/// content are not reported as a different build.
+fn verified_local_file_issue(entry: &AppEntry) -> Option<LocalFileIssue> {
+    let Some(current) = crate::config::file_fingerprint(&entry.local_path) else {
+        return Some(LocalFileIssue::Missing);
+    };
+    let Some(stored) = entry.file_fingerprint.as_ref() else {
+        return sidecar_is_older_than_file(entry, &current).then_some(LocalFileIssue::Changed);
+    };
+    if stored.size == current.size && stored.mtime == current.mtime {
+        return None;
+    }
+    if let Some(stored_hash) = stored.sha256.as_deref().filter(|hash| !hash.is_empty()) {
+        if crate::config::sha256_file(&entry.local_path)
+            .is_some_and(|current_hash| stored_hash.eq_ignore_ascii_case(&current_hash))
+        {
+            return None;
+        }
+    }
+    Some(LocalFileIssue::Changed)
+}
+
+/// Builds a fresh fingerprint for a known-good file. The content hash is
+/// reused when it already exists; only the first baseline hashes the file.
+fn baseline_fingerprint(entry: &AppEntry) -> Option<crate::config::FileFingerprint> {
+    let current = crate::config::file_fingerprint(&entry.local_path)?;
+    let existing_hash = entry
+        .file_fingerprint
+        .as_ref()
+        .and_then(|fingerprint| fingerprint.sha256.clone())
+        .filter(|hash| !hash.is_empty());
+    let sha256 = existing_hash.or_else(|| crate::config::sha256_file(&entry.local_path));
+    Some(crate::config::FileFingerprint {
+        size: current.size,
+        mtime: current.mtime,
+        sha256,
+    })
+}
+
+/// Persists a verified fingerprint, re-reading the live entry so a concurrent
+/// edit is not overwritten in the sidecar. Must be called from a background
+/// context (the sidecar write is small but the caller may be async).
+fn persist_baseline_fingerprint(
+    config: &Arc<Mutex<Config>>,
+    app_id: &str,
+    fingerprint: crate::config::FileFingerprint,
+    clear_version: bool,
+) -> bool {
+    let new_hash = fingerprint.sha256.clone();
+    let mut updated: Option<AppEntry> = None;
+    let mut found = false;
+    if let Ok(mut cfg) = config.lock() {
+        if let Some(stored) = cfg.applications.iter_mut().find(|a| a.id == app_id) {
+            found = true;
+            let mut changed = false;
+            let old_hash = stored
+                .file_fingerprint
+                .as_ref()
+                .and_then(|old| old.sha256.as_deref());
+            let content_unchanged = old_hash
+                .zip(new_hash.as_deref())
+                .is_some_and(|(old, new)| old.eq_ignore_ascii_case(new));
+            if stored.file_fingerprint.as_ref() != Some(&fingerprint) {
+                stored.file_fingerprint = Some(fingerprint);
+                changed = true;
+            }
+            if clear_version && !content_unchanged && !stored.current_version.is_empty() {
+                // The version recorded for the previous managed build no
+                // longer describes this manually accepted file.
+                stored.current_version.clear();
+                changed = true;
+            }
+            if changed {
+                updated = Some(stored.clone());
+            }
+        }
+        if updated.is_some() {
+            let _ = cfg.save();
+        }
+    }
+    if let Some(entry) = updated {
+        if entry.local_path.exists() {
+            let _ = appmeta::write_for_entry(&entry);
+        }
+    }
+    found
 }
 
 /// Guarantees a single trailing `;` on an XDG `Categories=` value.
@@ -2788,6 +3762,211 @@ mod tests {
             submitted_categories(&default_form).as_deref(),
             Some("Utility;")
         );
+    }
+
+    #[test]
+    fn update_checks_respect_cooldown() {
+        assert_eq!(update_check_cooldown_remaining(None, 1_000, 300), None);
+        assert_eq!(
+            update_check_cooldown_remaining(Some(1_000), 1_000, 300),
+            Some(300)
+        );
+        assert_eq!(
+            update_check_cooldown_remaining(Some(1_000), 1_120, 300),
+            Some(180)
+        );
+        assert_eq!(
+            update_check_cooldown_remaining(Some(1_000), 1_300, 300),
+            None
+        );
+        assert_eq!(
+            update_check_cooldown_remaining(Some(1_000), 10_000, 300),
+            None
+        );
+
+        // With a GitHub token the cooldown is two minutes instead of five.
+        assert_eq!(update_check_cooldown_secs(false), 5 * 60);
+        assert_eq!(update_check_cooldown_secs(true), 2 * 60);
+        assert_eq!(
+            update_check_cooldown_remaining(Some(1_000), 1_060, 120),
+            Some(60)
+        );
+        assert_eq!(
+            update_check_cooldown_remaining(Some(1_000), 1_120, 120),
+            None
+        );
+    }
+
+    #[test]
+    fn hub_update_uses_commit_hash_with_version_fallback() {
+        assert!(!hub_update_available_with(
+            "0123456789abcdef0123456789abcdef01234567",
+            "0123456789ABCDEF0123456789ABCDEF01234567",
+            "0.1.0",
+            "v0.2.0"
+        ));
+        assert!(hub_update_available_with(
+            "0123456789abcdef0123456789abcdef01234567",
+            "fedcba9876543210fedcba9876543210fedcba98",
+            "0.1.0",
+            "v0.2.0"
+        ));
+        assert!(!hub_update_available_with("", "", "0.1.0", "v0.1.0"));
+        assert!(hub_update_available_with("", "", "0.1.0", "v0.2.0"));
+    }
+
+    #[test]
+    fn update_check_compares_commit_hashes_only() {
+        assert!(!is_update_available(
+            Some("0123456789abcdef0123456789abcdef01234567"),
+            "0123456789ABCDEF0123456789ABCDEF01234567"
+        ));
+        assert!(is_update_available(
+            Some("0123456789abcdef0123456789abcdef01234567"),
+            "fedcba9876543210fedcba9876543210fedcba98"
+        ));
+        assert!(is_update_available(
+            None,
+            "fedcba9876543210fedcba9876543210fedcba98"
+        ));
+        assert!(is_update_available(
+            Some("   "),
+            "fedcba9876543210fedcba9876543210fedcba98"
+        ));
+    }
+
+    fn fingerprint_test_entry(local_path: std::path::PathBuf) -> AppEntry {
+        AppEntry {
+            id: "fingerprint-test".into(),
+            display_name: "Fingerprint Test".into(),
+            source: AppSource::GithubOnly {
+                github_repo: "owner/repo".into(),
+            },
+            local_path,
+            current_version: "v1.0.0".into(),
+            args: Vec::new(),
+            icon_path: None,
+            generic_name: None,
+            comment: None,
+            categories: None,
+            startup_notify: false,
+            asset_preference: None,
+            added_at: None,
+            commit_hash: Some("0123456789abcdef".into()),
+            file_fingerprint: None,
+            desktop_shortcut: false,
+            menu_entry: false,
+            mime_types: None,
+            exec_arg: None,
+        }
+    }
+
+    fn set_mtime(path: &std::path::Path, secs: u64) {
+        let mtime = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+    }
+
+    #[test]
+    fn sha256_of_known_content() {
+        let dir = std::env::temp_dir().join(format!("aim-sha-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("data.bin");
+        std::fs::write(&file, b"abc").unwrap();
+        assert_eq!(
+            crate::config::sha256_file(&file).as_deref(),
+            Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn verified_status_ignores_touched_but_identical_files() {
+        let dir = std::env::temp_dir().join(format!("aim-fp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let app = dir.join("app.appimage");
+        std::fs::write(&app, b"version one").unwrap();
+
+        let mut entry = fingerprint_test_entry(app.clone());
+        let original = crate::config::file_fingerprint_with_hash(&app).unwrap();
+        entry.file_fingerprint = Some(original.clone());
+        assert_eq!(verified_local_file_issue(&entry), None);
+
+        // Touch: cheap metadata changes, but the content hash still matches.
+        set_mtime(&app, original.mtime as u64 + 30);
+        assert_eq!(
+            cheap_local_file_issue(&entry),
+            Some(LocalFileIssue::Changed)
+        );
+        assert_eq!(verified_local_file_issue(&entry), None);
+
+        // Real replacement: content hash no longer matches.
+        std::fs::write(&app, b"a much longer replacement build").unwrap();
+        assert_eq!(
+            verified_local_file_issue(&entry),
+            Some(LocalFileIssue::Changed)
+        );
+
+        // Missing file has a distinct state.
+        std::fs::remove_file(&app).unwrap();
+        assert_eq!(
+            verified_local_file_issue(&entry),
+            Some(LocalFileIssue::Missing)
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn baseline_adds_hash_and_reuses_existing_hash() {
+        let dir = std::env::temp_dir().join(format!("aim-fp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let app = dir.join("app.appimage");
+        std::fs::write(&app, b"payload").unwrap();
+
+        let mut entry = fingerprint_test_entry(app.clone());
+        let cheap = crate::config::file_fingerprint(&app).unwrap();
+        entry.file_fingerprint = Some(cheap);
+        let baseline = baseline_fingerprint(&entry).unwrap();
+        assert!(baseline.sha256.is_some());
+
+        set_mtime(&app, baseline.mtime as u64 + 5);
+        entry.file_fingerprint = Some(baseline.clone());
+        let rebaselined = baseline_fingerprint(&entry).unwrap();
+        assert_eq!(rebaselined.sha256, baseline.sha256);
+        assert_eq!(rebaselined.mtime, baseline.mtime + 5);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_entries_compare_appimage_mtime_with_sidecar() {
+        let dir = std::env::temp_dir().join(format!("aim-fp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let app = dir.join("app.appimage");
+        std::fs::write(&app, b"binary").unwrap();
+        set_mtime(&app, 1_700_000_000);
+
+        let sidecar = crate::appmeta::sidecar_path(&app);
+        std::fs::write(&sidecar, b"{}").unwrap();
+
+        // Sidecar written before the binary => file replaced outside the app.
+        set_mtime(&sidecar, 1_699_999_000);
+        let entry = fingerprint_test_entry(app.clone());
+        assert_eq!(
+            verified_local_file_issue(&entry),
+            Some(LocalFileIssue::Changed)
+        );
+
+        // Sidecar written after the binary => normal managed state.
+        set_mtime(&sidecar, 1_700_001_000);
+        assert_eq!(verified_local_file_issue(&entry), None);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

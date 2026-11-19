@@ -176,6 +176,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires GitHub network access"]
     async fn download_public_appimage_and_replace() -> Result<()> {
         crate::github::ensure_crypto_provider();
         let octo = octocrab::Octocrab::builder().build()?;

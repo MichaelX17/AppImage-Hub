@@ -16,12 +16,54 @@ pub fn quote_exec_arg(arg: &str) -> String {
     }
 }
 
+fn single_line(value: &str) -> String {
+    value.replace(['\r', '\n'], " ").trim().to_string()
+}
+
+fn sanitize_mime_types(raw: &str) -> Option<String> {
+    let values: Vec<&str> = raw
+        .split(';')
+        .map(str::trim)
+        .filter(|mime| {
+            !mime.is_empty()
+                && mime
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-+./".contains(c))
+        })
+        .collect();
+    (!values.is_empty()).then(|| format!("{};", values.join(";")))
+}
+
+fn is_custom_scheme(mime: &str) -> bool {
+    mime.starts_with("x-scheme-handler/")
+}
+
+fn is_sensitive_scheme(mime: &str) -> bool {
+    const SENSITIVE: &[&str] = &[
+        "x-scheme-handler/http",
+        "x-scheme-handler/https",
+        "x-scheme-handler/file",
+        "x-scheme-handler/mailto",
+        "x-scheme-handler/tel",
+        "x-scheme-handler/ftp",
+        "x-scheme-handler/ssh",
+    ];
+    SENSITIVE.contains(&mime)
+}
+
 pub fn build_exec(app: &AppEntry) -> String {
-    std::iter::once(app.local_path.to_string_lossy().into_owned())
-        .chain(app.args.iter().cloned())
-        .map(|a| quote_exec_arg(&a))
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut parts = vec![quote_exec_arg(&app.local_path.to_string_lossy())];
+    if let Some(placeholder) = app
+        .exec_arg
+        .as_deref()
+        .map(str::trim)
+        .filter(|arg| !arg.is_empty())
+    {
+        // Exec field codes such as %U must remain unquoted.
+        parts.push(placeholder.to_string());
+    }
+    parts.extend(app.args.iter().map(|arg| quote_exec_arg(arg)));
+    parts.join(" ")
 }
 
 pub fn desktop_filename(app: &AppEntry) -> String {
@@ -44,10 +86,11 @@ pub fn legacy_id_filename(app_id: &str) -> String {
 
 pub fn desktop_file_content(app: &AppEntry) -> String {
     let exec = build_exec(app);
+    let display_name = single_line(&app.display_name);
     let categories = app
         .categories
         .as_deref()
-        .map(|c| c.trim())
+        .map(str::trim)
         .filter(|c| !c.is_empty())
         .map(|c| {
             if c.ends_with(';') {
@@ -62,18 +105,18 @@ pub fn desktop_file_content(app: &AppEntry) -> String {
         "[Desktop Entry]\n\
          Type=Application\n\
          Name={}\n",
-        app.display_name,
+        display_name,
     );
 
     if let Some(generic) = &app.generic_name {
-        let g = generic.trim();
+        let g = single_line(generic);
         if !g.is_empty() {
             content.push_str(&format!("GenericName={g}\n"));
         }
     }
 
     if let Some(comment) = &app.comment {
-        let c = comment.trim();
+        let c = single_line(comment);
         if !c.is_empty() {
             content.push_str(&format!("Comment={c}\n"));
         }
@@ -88,6 +131,10 @@ pub fn desktop_file_content(app: &AppEntry) -> String {
         if app.startup_notify { "true" } else { "false" },
         categories,
     ));
+
+    if let Some(mime_types) = app.mime_types.as_deref().and_then(sanitize_mime_types) {
+        content.push_str(&format!("MimeType={mime_types}\n"));
+    }
 
     let icon_to_use = if let Some(icon) = &app.icon_path {
         let s = icon.to_string_lossy();
@@ -145,6 +192,102 @@ pub fn desktop_shortcut_path(app: &AppEntry, desktop_dir: &Path) -> std::path::P
     desktop_dir.join(desktop_filename(app))
 }
 
+fn mimeapps_path() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|dir| dir.join("mimeapps.list"))
+}
+
+/// Adds or removes conservative default URI-handler entries in
+/// `mimeapps.list`. Ordinary file MIME types and sensitive schemes are never
+/// registered automatically, and existing user defaults are preserved.
+fn update_mimeapps_defaults(desktop_filename: &str, mime_types: Option<&str>) -> Result<()> {
+    let Some(path) = mimeapps_path() else {
+        return Ok(());
+    };
+
+    let wanted: Vec<String> = mime_types
+        .unwrap_or_default()
+        .split(';')
+        .map(str::trim)
+        .filter(|mime| is_custom_scheme(mime) && !is_sensitive_scheme(mime))
+        .map(str::to_string)
+        .collect();
+
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut out: Vec<String> = Vec::new();
+    let mut in_defaults = false;
+    let mut found_section = false;
+    let mut present: Vec<String> = Vec::new();
+
+    let flush_missing = |out: &mut Vec<String>, present: &Vec<String>| {
+        for mime in &wanted {
+            if !present.contains(mime) {
+                out.push(format!("{mime}={desktop_filename}"));
+            }
+        }
+    };
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if in_defaults {
+                flush_missing(&mut out, &present);
+            }
+            in_defaults = trimmed == "[Default Applications]";
+            found_section |= in_defaults;
+            out.push(line.to_string());
+            continue;
+        }
+
+        if in_defaults {
+            if let Some((key, value)) = trimmed.split_once('=') {
+                let key = key.trim();
+                let value = value.trim();
+                if value == desktop_filename {
+                    // Remove stale mapping for this app; if still wanted it
+                    // will be re-added by flush_missing.
+                    continue;
+                }
+                if wanted.iter().any(|mime| mime == key) {
+                    // Preserve an existing default owned by another app.
+                    present.push(key.to_string());
+                }
+            }
+        }
+        out.push(line.to_string());
+    }
+
+    if in_defaults {
+        flush_missing(&mut out, &present);
+    } else if !wanted.is_empty() {
+        if !out.is_empty() && out.last().is_some_and(|line| !line.trim().is_empty()) {
+            out.push(String::new());
+        }
+        out.push("[Default Applications]".to_string());
+        for mime in &wanted {
+            out.push(format!("{mime}={desktop_filename}"));
+        }
+    }
+
+    if !found_section && wanted.is_empty() && !path.exists() {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    if path.exists() {
+        let backup = path.with_extension("list.bak");
+        let _ = std::fs::copy(&path, backup);
+    }
+    let tmp = path.with_extension("list.tmp");
+    std::fs::write(&tmp, out.join("\n") + "\n")
+        .with_context(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("failed to replace {}", path.display()))?;
+    Ok(())
+}
+
 fn refresh_menu_cache(applications_dir: &Path) {
     let _ = std::process::Command::new("update-desktop-database")
         .arg(applications_dir)
@@ -163,78 +306,95 @@ fn refresh_menu_cache(applications_dir: &Path) {
         .status();
 }
 
-/// Automatically registers AppImage Hub's own .desktop entry and icon in
-/// `~/.local/share/applications` and `~/.local/share/icons/hicolor`.
-///
-/// On Wayland (KDE Plasma / KWin), client windows cannot push raw icon pixels
-/// for window titlebar decorations. KWin matches the window's `app_id` to an
-/// installed `.desktop` file and reads its `Icon=` property. If no matching
-/// `.desktop` file is found, KWin falls back to the generic Wayland logo.
-pub fn ensure_hub_desktop_entry() {
-    let Ok(apps_dir) = xdg::applications_dir() else {
-        return;
+/// Returns the .desktop content for AppImage Hub itself. The Exec path is
+/// always derived from the currently running executable.
+fn hub_executable_path() -> std::path::PathBuf {
+    // Inside an AppImage, current_exe() points into the temporary SquashFS
+    // mount that disappears when the app exits. $APPIMAGE is the real,
+    // persistent AppImage path. Fall back to current_exe() when running from
+    // a normal binary during development.
+    std::env::var_os("APPIMAGE")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.exists())
+        .or_else(|| std::env::current_exe().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("appimage-manager"))
+}
+
+fn hub_desktop_content(category: &str) -> String {
+    let exec = hub_executable_path().to_string_lossy().to_string();
+    let category = category.trim();
+    let category = if category.is_empty() {
+        "Utility;".to_string()
+    } else if category.ends_with(';') {
+        category.to_string()
+    } else {
+        format!("{category};")
     };
-    let data_dir = dirs::data_dir().unwrap_or_else(|| {
-        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share")
-    });
-
-    // 1. Install icon to ~/.local/share/icons/hicolor/512x512/apps/appimage-hub.png
-    let icon_dir = data_dir.join("icons/hicolor/512x512/apps");
-    let icon_path = icon_dir.join("appimage-hub.png");
-    let logo_bytes = include_bytes!("../assets/logo.png");
-
-    let need_write_icon = match std::fs::read(&icon_path) {
-        Ok(existing) => existing != logo_bytes,
-        Err(_) => true,
-    };
-    if need_write_icon {
-        let _ = std::fs::create_dir_all(&icon_dir);
-        let _ = std::fs::write(&icon_path, logo_bytes);
-    }
-
-    // 2. Install desktop entry to ~/.local/share/applications/appimage-hub.desktop
-    let desktop_path = apps_dir.join("appimage-hub.desktop");
-    let current_exe = std::env::current_exe()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "appimage-manager".into());
-
-    let desktop_content = format!(
+    format!(
         "[Desktop Entry]\n\
          Type=Application\n\
          Name=AppImage Hub\n\
          GenericName=AppImage Manager\n\
          Comment=Manage, launch, and update AppImages\n\
-         Exec=\"{}\"\n\
+         Exec={}\n\
          Icon=appimage-hub\n\
          Terminal=false\n\
          StartupNotify=true\n\
          StartupWMClass=appimage-hub\n\
-         Categories=Utility;\n",
-        current_exe
-    );
+         Categories={}\n",
+        quote_exec_arg(&exec),
+        category
+    )
+}
 
-    // Never overwrite an existing user-managed entry. In particular, AppImage
-    // Hub can manage its own AppImage; regenerating this file on every launch
-    // would replace that entry's Exec/category with the temporary mounted path.
-    let mut wrote_entry = false;
-    if !desktop_path.exists() {
-        let _ = std::fs::create_dir_all(&apps_dir);
-        let _ = std::fs::write(&desktop_path, &desktop_content);
-        let _ = set_entry_permissions(&desktop_path);
-        wrote_entry = true;
+fn install_hub_icon() {
+    let data_dir = dirs::data_dir().unwrap_or_else(|| {
+        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share")
+    });
+    let icon_dir = data_dir.join("icons/hicolor/512x512/apps");
+    let icon_path = icon_dir.join("appimage-hub.png");
+    let logo_bytes = include_bytes!("../assets/logo.png");
+    let need_write = std::fs::read(&icon_path)
+        .map(|existing| existing != logo_bytes)
+        .unwrap_or(true);
+    if need_write {
+        let _ = std::fs::create_dir_all(&icon_dir);
+        let _ = std::fs::write(&icon_path, logo_bytes);
     }
+}
 
-    // Also provide a process-name alias for compositors that match the binary
-    // name rather than the window app_id, without clobbering a managed app.
-    let alt_desktop = apps_dir.join("appimage-manager.desktop");
-    if !alt_desktop.exists() {
-        let _ = std::fs::write(&alt_desktop, &desktop_content);
-        let _ = set_entry_permissions(&alt_desktop);
-        wrote_entry = true;
-    }
+/// Rewrites or removes AppImage Hub's own shortcuts according to settings.
+/// Called on startup, after saving Settings, and after a self-update restart.
+pub fn sync_hub_shortcuts(create_menu: bool, create_desktop: bool, start_menu_category: &str) {
+    install_hub_icon();
+    let content = hub_desktop_content(start_menu_category);
 
-    if wrote_entry {
+    if let Ok(apps_dir) = xdg::applications_dir() {
+        let path = apps_dir.join("appimage-hub.desktop");
+        if create_menu {
+            let _ = std::fs::create_dir_all(&apps_dir);
+            let _ = std::fs::write(&path, &content);
+            let _ = set_entry_permissions(&path);
+        } else {
+            let _ = std::fs::remove_file(&path);
+        }
         refresh_menu_cache(&apps_dir);
+    }
+
+    if let Ok(desktop_dir) = xdg::desktop_dir() {
+        let path = desktop_dir.join("appimage-hub.desktop");
+        if create_desktop {
+            let _ = std::fs::create_dir_all(&desktop_dir);
+            let _ = std::fs::write(&path, &content);
+            let _ = set_entry_permissions(&path);
+            let _ = std::process::Command::new("gio")
+                .args(["set", &path.to_string_lossy(), "metadata::trusted", "true"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        } else {
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
 
@@ -254,6 +414,7 @@ pub fn write_menu_entry(app: &AppEntry, applications_dir: &Path) -> Result<()> {
         }
     }
 
+    let _ = update_mimeapps_defaults(&filename, app.mime_types.as_deref());
     refresh_menu_cache(applications_dir);
     Ok(())
 }
@@ -289,6 +450,10 @@ pub fn remove_menu_entry(app: &AppEntry, applications_dir: &Path) -> Result<()> 
     if legacy_name != new_name {
         remove_file_if_exists(&applications_dir.join(&legacy_name))?;
     }
+    let _ = update_mimeapps_defaults(&new_name, None);
+    if legacy_name != new_name {
+        let _ = update_mimeapps_defaults(&legacy_name, None);
+    }
     refresh_menu_cache(applications_dir);
     Ok(())
 }
@@ -313,6 +478,7 @@ pub fn remove_entry_files(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn write_entry(app: &AppEntry, desktop_dir: &Path, applications_dir: &Path) -> Result<()> {
     // Applications menu entry is required for Start Menu integration.
     write_menu_entry(app, applications_dir)?;
@@ -348,6 +514,12 @@ mod tests {
             startup_notify: true,
             asset_preference: None,
             added_at: None,
+            commit_hash: None,
+            file_fingerprint: None,
+            desktop_shortcut: true,
+            menu_entry: true,
+            mime_types: None,
+            exec_arg: None,
         }
     }
 
@@ -381,6 +553,32 @@ mod tests {
         app.categories = Some("AudioVideo".into());
         let content = desktop_file_content(&app);
         assert!(content.contains("Categories=AudioVideo;\n"));
+    }
+
+    #[test]
+    fn mime_sanitization_keeps_valid_tokens_only() {
+        assert_eq!(
+            sanitize_mime_types("x-scheme-handler/heroic; application/x-iso9660-image;bad\nmime")
+                .as_deref(),
+            Some("x-scheme-handler/heroic;application/x-iso9660-image;")
+        );
+        assert_eq!(sanitize_mime_types(";;;"), None);
+    }
+
+    #[test]
+    fn sensitive_schemes_are_not_auto_registered() {
+        assert!(is_custom_scheme("x-scheme-handler/heroic"));
+        assert!(is_sensitive_scheme("x-scheme-handler/https"));
+        assert!(!is_sensitive_scheme("x-scheme-handler/heroic"));
+    }
+
+    #[test]
+    fn exec_placeholder_is_not_quoted() {
+        let mut app = sample_app(vec![]);
+        app.exec_arg = Some("%U".into());
+        let exec = build_exec(&app);
+        assert!(exec.ends_with(" %U"));
+        assert!(!exec.contains("\"%U\""));
     }
 
     #[test]
