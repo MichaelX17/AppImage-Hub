@@ -28,6 +28,13 @@ impl ManagerApp {
                         .strong()
                         .color(crate::ui::theme::TEXT_PRIMARY),
                 );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
+                        .size(11.0)
+                        .strong()
+                        .color(crate::ui::theme::TEXT_MUTED),
+                );
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
