@@ -75,6 +75,14 @@ pub struct AppMetadataFile {
     pub categories: Option<String>,
     #[serde(default = "default_startup_notify")]
     pub startup_notify: bool,
+    /// Window class used by the task manager to group the running app with its
+    /// shortcut.
+    #[serde(default)]
+    pub startup_wm_class: Option<String>,
+    /// Whether `startup_wm_class` was auto-detected. `None` marks legacy files
+    /// that are re-detected once at startup.
+    #[serde(default)]
+    pub startup_wm_class_auto: Option<bool>,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
@@ -131,6 +139,8 @@ impl AppMetadataFile {
             comment: entry.comment.clone(),
             categories: entry.categories.clone(),
             startup_notify: entry.startup_notify,
+            startup_wm_class: entry.startup_wm_class.clone(),
+            startup_wm_class_auto: entry.startup_wm_class_auto,
             args: entry.args.clone(),
             source: Some(entry.source.clone()),
             current_version: entry.current_version.clone(),
@@ -174,6 +184,8 @@ impl AppMetadataFile {
             comment: self.comment.clone(),
             categories: self.categories.clone(),
             startup_notify: self.startup_notify,
+            startup_wm_class: self.startup_wm_class.clone(),
+            startup_wm_class_auto: self.startup_wm_class_auto,
             source: self.source.clone().unwrap_or(AppSource::LocalOnly),
             local_path,
             current_version: self.current_version.clone(),
@@ -308,6 +320,8 @@ mod tests {
             comment: Some("Does example things".into()),
             categories: Some("Graphics;".into()),
             startup_notify: true,
+            startup_wm_class: Some("example".into()),
+            startup_wm_class_auto: Some(true),
             source: AppSource::LocalWithRepo {
                 github_repo: "owner/example".into(),
             },
@@ -367,6 +381,8 @@ mod tests {
         assert_eq!(restored.display_name, entry.display_name);
         assert_eq!(restored.source, entry.source);
         assert_eq!(restored.icon_path, Some(dir.join("icon.png")));
+        assert_eq!(restored.startup_wm_class.as_deref(), Some("example"));
+        assert_eq!(restored.startup_wm_class_auto, Some(true));
 
         std::fs::remove_dir_all(&dir)?;
         Ok(())

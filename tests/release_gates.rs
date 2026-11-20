@@ -27,6 +27,8 @@ fn sample_entry(path: PathBuf, categories: Option<String>) -> AppEntry {
         comment: None,
         categories,
         startup_notify: true,
+        startup_wm_class: None,
+        startup_wm_class_auto: None,
         asset_preference: None,
         added_at: None,
         commit_hash: None,
@@ -118,6 +120,21 @@ fn desktop_categories_cannot_inject_keys() {
     );
     assert!(!content.lines().any(|line| line.starts_with("Exec=sh")));
     assert!(content.contains("Categories=Utility;\n"));
+}
+
+#[test]
+fn desktop_shortcut_groups_windows_via_startup_wm_class() {
+    let mut entry = sample_entry(PathBuf::from("/tmp/example.appimage"), None);
+    entry.startup_wm_class = Some("example".into());
+    let content = appimage_hub::desktop_entry::desktop_file_content(&entry);
+    assert!(content.contains("StartupWMClass=example\n"));
+    assert_eq!(
+        content
+            .lines()
+            .filter(|line| line.starts_with("StartupWMClass="))
+            .count(),
+        1
+    );
 }
 
 #[test]

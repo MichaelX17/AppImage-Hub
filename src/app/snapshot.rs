@@ -59,6 +59,7 @@ impl ManagerApp {
     pub(crate) fn run_startup_scan(&mut self) {
         self.repair_missing_icons();
         self.normalize_managed_filenames();
+        self.repair_startup_wm_classes();
         let report = self.sync_metadata_files();
         let mut message = "Storage scan complete.".to_string();
         if report.adopted > 0 {

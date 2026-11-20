@@ -199,6 +199,8 @@ pub(crate) fn app_entry_from_appimage(path: &Path) -> AppEntry {
         comment: None,
         categories: None,
         startup_notify: true,
+        startup_wm_class: None,
+        startup_wm_class_auto: None,
         source: AppSource::LocalOnly,
         local_path: path.to_path_buf(),
         current_version: String::new(),

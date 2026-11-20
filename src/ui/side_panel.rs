@@ -107,6 +107,8 @@ pub struct SidePanelFormState {
     /// the selector can remain on its Utility default until the user chooses.
     pub detected_category: Option<String>,
     pub startup_notify: bool,
+    /// Window class written as `StartupWMClass=` in generated shortcuts.
+    pub startup_wm_class: String,
     pub desktop_shortcut: bool,
     pub menu_entry: bool,
     pub mime_types: String,
@@ -139,6 +141,7 @@ impl Default for SidePanelFormState {
             category_user_selected: false,
             detected_category: None,
             startup_notify: true,
+            startup_wm_class: String::new(),
             desktop_shortcut: true,
             menu_entry: true,
             mime_types: String::new(),
@@ -516,6 +519,24 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
     );
     ui.label(
         theme::muted_label("Shows launch animation/busy cursor in Plasma session.").size(11.0),
+    );
+
+    ui.add_space(theme::SPACE_SM);
+    ui.label(theme::field_label(
+        "Window class / StartupWMClass (optional)",
+    ));
+    form_text_input(
+        ui,
+        &mut mgr.side_panel_form.startup_wm_class,
+        "e.g. pcsx2, heroic, code",
+        width,
+    );
+    ui.label(
+        theme::muted_label(
+            "Keeps the running app and its pinned shortcut in one task manager icon. \
+             Detected from the AppImage; change it if a second icon appears.",
+        )
+        .size(11.0),
     );
 
     ui.add_space(theme::SPACE_LG);

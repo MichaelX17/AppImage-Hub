@@ -69,7 +69,7 @@ cargo build --release
 The generated AppImage is written to:
 
 ```text
-dist/AppImage-Hub-0.2.0-x86_64.AppImage
+dist/AppImage-Hub-0.2.1-x86_64.AppImage
 ```
 
 The build script prepares an `AppDir`, installs the desktop entry, icon, AppStream metadata, and custom AppImage Hub metadata, then packages everything with `appimagetool`.
@@ -89,7 +89,7 @@ The build script prepares an `AppDir`, installs the desktop entry, icon, AppStre
 
 AppImage Hub reads standard metadata from inside the AppImage:
 
-- `.desktop` file: `Name`, `GenericName`, `Comment`, `Categories`, `StartupNotify`, `Icon`
+- `.desktop` file: `Name`, `GenericName`, `Comment`, `Categories`, `StartupNotify`, `StartupWMClass`, `Icon`
 - `.DirIcon` or the icon referenced by the desktop entry
 
 Managed apps also keep a portable JSON sidecar beside the AppImage:

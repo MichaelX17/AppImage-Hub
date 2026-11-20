@@ -256,6 +256,8 @@ mod tests {
             comment: None,
             categories: None,
             startup_notify: true,
+            startup_wm_class: None,
+            startup_wm_class_auto: None,
             asset_preference: None,
             added_at: None,
             commit_hash: None,

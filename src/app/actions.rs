@@ -8,6 +8,7 @@ struct ImportRequest {
     comment: Option<String>,
     categories: Option<String>,
     startup_notify: bool,
+    startup_wm_class: Option<String>,
     desktop_shortcut: bool,
     menu_entry: bool,
     mime_types: Option<String>,
@@ -26,6 +27,7 @@ impl ManagerApp {
         display_name: String,
         asset_name: Option<String>,
         categories: Option<String>,
+        startup_wm_class: Option<String>,
         desktop_shortcut: bool,
         menu_entry: bool,
         mime_types: Option<String>,
@@ -57,6 +59,7 @@ impl ManagerApp {
                     display_name: display_name.clone(),
                     asset_name: asset_name.clone(),
                     categories: categories.clone(),
+                    startup_wm_class: startup_wm_class.clone(),
                     desktop_shortcut,
                     menu_entry,
                     mime_types: mime_types.clone(),
@@ -71,6 +74,7 @@ impl ManagerApp {
             display_name,
             asset_name,
             categories,
+            startup_wm_class,
             desktop_shortcut,
             menu_entry,
             mime_types,
@@ -337,6 +341,7 @@ impl ManagerApp {
             category_user_selected: true,
             detected_category: None,
             startup_notify: entry.startup_notify,
+            startup_wm_class: entry.startup_wm_class.clone().unwrap_or_default(),
             desktop_shortcut: entry.desktop_shortcut,
             menu_entry: entry.menu_entry,
             mime_types: mime_types.unwrap_or_default(),
@@ -373,6 +378,7 @@ impl ManagerApp {
                     display_name,
                     asset_name,
                     categories,
+                    startup_wm_class,
                     desktop_shortcut,
                     menu_entry,
                     mime_types,
@@ -382,6 +388,7 @@ impl ManagerApp {
                     display_name,
                     asset_name,
                     categories,
+                    startup_wm_class,
                     desktop_shortcut,
                     menu_entry,
                     mime_types,
@@ -893,6 +900,12 @@ impl ManagerApp {
                 self.side_panel_form.startup_notify = notify;
             }
 
+            if self.side_panel_form.startup_wm_class.trim().is_empty() {
+                if let Some(wm_class) = meta.startup_wm_class {
+                    self.side_panel_form.startup_wm_class = wm_class;
+                }
+            }
+
             if let Some(icon_p) = meta.icon_path {
                 self.side_panel_form.icon_path = icon_p.display().to_string();
             }
@@ -947,6 +960,12 @@ impl ManagerApp {
         }
 
         self.side_panel_form.startup_notify = meta.startup_notify;
+
+        if self.side_panel_form.startup_wm_class.trim().is_empty() {
+            if let Some(wm_class) = &meta.startup_wm_class {
+                self.side_panel_form.startup_wm_class = wm_class.clone();
+            }
+        }
 
         if self.side_panel_form.mime_types.trim().is_empty() {
             if let Some(mime_types) = meta
@@ -1041,6 +1060,91 @@ impl ManagerApp {
 
         for app in apps_to_rewrite {
             refresh_existing_shortcuts(&app);
+        }
+    }
+
+    /// Backfills `StartupWMClass` for entries that have no value or predate the
+    /// `startup_wm_class_auto` flag. The window class is read from the
+    /// AppImage's embedded `.desktop` file via non-executing extraction.
+    pub(crate) fn repair_startup_wm_classes(&mut self) {
+        let candidates: Vec<AppEntry> = self
+            .config
+            .lock()
+            .map(|cfg| {
+                cfg.applications
+                    .iter()
+                    .filter(|app| {
+                        app.local_path.exists()
+                            && (app.startup_wm_class.is_none()
+                                || app.startup_wm_class_auto.is_none())
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if candidates.is_empty() {
+            return;
+        }
+
+        let mut repaired: Vec<(AppEntry, bool)> = Vec::with_capacity(candidates.len());
+        for mut app in candidates {
+            let (mut detected, sidecar_protected) =
+                match appmeta::read_for_appimage_result(&app.local_path) {
+                    Ok(Some(meta)) => (
+                        meta.startup_wm_class
+                            .and_then(|value| crate::appimage::normalize_startup_wm_class(&value)),
+                        false,
+                    ),
+                    Ok(None) => (None, false),
+                    Err(appmeta::SidecarError::UnsupportedSchema { .. }) => (None, true),
+                    Err(_) => (None, false),
+                };
+            // A legacy sidecar may contain the old display-name fallback
+            // instead of the real window class. Do not trust it: re-read the
+            // AppImage's embedded desktop entry.
+            let display_fallback = xdg::sanitize_name(&app.display_name);
+            if detected.as_deref() == Some(display_fallback.as_str()) {
+                detected = None;
+            }
+            if detected.is_none() {
+                if let Ok(meta) = crate::appimage::extract_metadata_with_policy(
+                    &app.local_path,
+                    None,
+                    crate::appimage::ExtractionPolicy::NeverExecute,
+                ) {
+                    detected = meta.startup_wm_class;
+                }
+            }
+            if detected.is_some() {
+                app.startup_wm_class = detected;
+            }
+            app.startup_wm_class_auto = Some(true);
+            repaired.push((app, sidecar_protected));
+        }
+
+        let saved = self
+            .config
+            .lock()
+            .map(|mut cfg| {
+                for (app, _) in &repaired {
+                    if let Some(stored) = cfg.applications.iter_mut().find(|a| a.id == app.id) {
+                        stored.startup_wm_class = app.startup_wm_class.clone();
+                        stored.startup_wm_class_auto = app.startup_wm_class_auto;
+                    }
+                }
+                cfg.save()
+            })
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("configuration lock is poisoned")));
+        if let Err(error) = saved {
+            self.status = Some(format!("Could not save window-class metadata: {error:#}"));
+            return;
+        }
+
+        for (app, sidecar_protected) in &repaired {
+            refresh_existing_shortcuts(app);
+            if !sidecar_protected {
+                let _ = appmeta::write_for_entry(app);
+            }
         }
     }
 
@@ -1275,6 +1379,8 @@ impl ManagerApp {
             comment: request.comment,
             categories: request.categories,
             startup_notify: request.startup_notify,
+            startup_wm_class: request.startup_wm_class,
+            startup_wm_class_auto: Some(false),
             source,
             local_path: managed_path.clone(),
             current_version: String::new(),
@@ -1351,6 +1457,10 @@ impl ManagerApp {
         };
         let categories = submitted_categories(&form);
         let startup_notify = form.startup_notify;
+        let startup_wm_class = {
+            let value = form.startup_wm_class.trim();
+            (!value.is_empty()).then(|| value.to_string())
+        };
         let desktop_shortcut = form.desktop_shortcut;
         let menu_entry = form.menu_entry;
         let mime_types = crate::desktop_entry::normalize_mime_types(form.mime_types.trim());
@@ -1376,6 +1486,17 @@ impl ManagerApp {
                     e.comment = comment;
                     e.categories = categories;
                     e.startup_notify = startup_notify;
+                    let previous_auto =
+                        old_entry.as_ref().and_then(|old| old.startup_wm_class_auto);
+                    let unchanged = old_entry
+                        .as_ref()
+                        .is_some_and(|old| old.startup_wm_class == startup_wm_class);
+                    e.startup_wm_class = startup_wm_class.clone();
+                    e.startup_wm_class_auto = if unchanged {
+                        previous_auto
+                    } else {
+                        Some(false)
+                    };
                     e.desktop_shortcut = desktop_shortcut;
                     e.menu_entry = menu_entry;
                     e.mime_types = mime_types.clone();
@@ -1477,6 +1598,7 @@ impl ManagerApp {
                     comment,
                     categories,
                     startup_notify,
+                    startup_wm_class,
                     desktop_shortcut,
                     menu_entry,
                     mime_types,
@@ -1497,6 +1619,7 @@ impl ManagerApp {
                     display_name,
                     asset_preference,
                     categories,
+                    startup_wm_class,
                     desktop_shortcut,
                     menu_entry,
                     mime_types,

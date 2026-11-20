@@ -70,6 +70,7 @@ pub enum BackendCommand {
         /// Desktop category selected in the UI, already `;`-terminated.
         /// Takes precedence over anything detected inside the AppImage.
         categories: Option<String>,
+        startup_wm_class: Option<String>,
         desktop_shortcut: bool,
         menu_entry: bool,
         mime_types: Option<String>,
@@ -273,6 +274,7 @@ pub enum RetryAction {
         display_name: String,
         asset_name: Option<String>,
         categories: Option<String>,
+        startup_wm_class: Option<String>,
         desktop_shortcut: bool,
         menu_entry: bool,
         mime_types: Option<String>,

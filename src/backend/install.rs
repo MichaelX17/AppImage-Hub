@@ -13,6 +13,7 @@ pub(super) async fn run_install_from_repo(
     display_name: String,
     asset_name: Option<String>,
     categories: Option<String>,
+    startup_wm_class: Option<String>,
     desktop_shortcut: bool,
     menu_entry: bool,
     mime_types: Option<String>,
@@ -147,6 +148,10 @@ pub(super) async fn run_install_from_repo(
                                     .as_ref()
                                     .and_then(|m| m.startup_notify)
                                     .unwrap_or(true),
+                                startup_wm_class: startup_wm_class.or_else(|| {
+                                    app_meta.as_ref().and_then(|m| m.startup_wm_class.clone())
+                                }),
+                                startup_wm_class_auto: Some(true),
                                 source: AppSource::GithubOnly { github_repo },
                                 local_path: target,
                                 current_version: info.tag,

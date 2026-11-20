@@ -191,6 +191,8 @@ fn fingerprint_test_entry(local_path: std::path::PathBuf) -> AppEntry {
         comment: None,
         categories: None,
         startup_notify: false,
+        startup_wm_class: None,
+        startup_wm_class_auto: None,
         asset_preference: None,
         added_at: None,
         commit_hash: Some("0123456789abcdef".into()),

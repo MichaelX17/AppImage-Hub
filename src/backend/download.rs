@@ -66,12 +66,27 @@ pub(super) async fn run_download_and_replace(
                     };
                 let checksum = finalized.checksum;
                 let downloaded_fingerprint = finalized.fingerprint;
+                // Re-read the window class from the new build so a future
+                // release that changes its WM_CLASS keeps grouping correctly.
+                let refreshed_wm_class = crate::appimage::extract_metadata_with_policy(
+                    &target,
+                    None,
+                    crate::appimage::ExtractionPolicy::NeverExecute,
+                )
+                .ok()
+                .and_then(|meta| meta.startup_wm_class);
                 let mut updated_entry: Option<AppEntry> = None;
                 if let Ok(mut cfg) = config.lock() {
                     if let Some(entry) = cfg.applications.iter_mut().find(|a| a.id == app_id) {
                         entry.current_version = tag.clone();
                         entry.commit_hash = Some(commit_hash.clone());
                         entry.file_fingerprint = downloaded_fingerprint;
+                        if entry.startup_wm_class_auto != Some(false) {
+                            if let Some(wm_class) = &refreshed_wm_class {
+                                entry.startup_wm_class = Some(wm_class.clone());
+                                entry.startup_wm_class_auto = Some(true);
+                            }
+                        }
                         if entry
                             .icon_path
                             .as_ref()

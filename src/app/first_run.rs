@@ -23,6 +23,7 @@ impl ManagerApp {
         self.config_warning = None;
         self.repair_missing_icons();
         self.normalize_managed_filenames();
+        self.repair_startup_wm_classes();
         let report = self.sync_metadata_files();
         let mut message = format!("AppImages will be stored in {}", apps_dir.display());
         if report.adopted > 0 {

@@ -2,6 +2,23 @@
 
 All notable changes to AppImage Hub.
 
+## 0.2.1 — 2026-11-20
+
+Desktop-integration patch release: correct task-manager icon grouping for
+pinned AppImages and broader metadata extraction.
+
+### Fixed
+
+- Generated `.desktop` shortcuts now write `StartupWMClass`, so launching a
+  pinned app no longer opens a second task-manager icon. The exact value is
+  read from the AppImage's embedded desktop entry, `Exec=` program name, or
+  `AppRun`, can be edited in the add/edit form, and is backfilled for existing
+  apps on startup. Installed updates re-read the class from the new build
+  unless the user overrode it.
+- Metadata extraction now handles desktop entries stored as root symlinks and
+  AppImages whose SquashFS payload is hidden behind an embedded compressed
+  stream (e.g. DeepSeek Harness, Zen Browser), without executing the AppImage.
+
 ## 0.2.0 — 2026-11-19
 
 Production-hardening release. No UI redesign; behavior is otherwise unchanged.

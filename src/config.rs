@@ -207,6 +207,15 @@ pub struct AppEntry {
     pub categories: Option<String>,
     #[serde(default = "default_startup_notify")]
     pub startup_notify: bool,
+    /// Window class used to group the running app with its shortcuts in the
+    /// task manager. Detected from the AppImage's embedded `.desktop` file.
+    #[serde(default)]
+    pub startup_wm_class: Option<String>,
+    /// `Some(true)` when [`Self::startup_wm_class`] was auto-detected and is
+    /// safe to trust, `Some(false)` when the user supplied it, and `None` for
+    /// entries written before this flag existed (re-detected once at startup).
+    #[serde(default)]
+    pub startup_wm_class_auto: Option<bool>,
     #[serde(default)]
     pub asset_preference: Option<String>,
     /// Unix timestamp for when the app was added. Older configs may omit it.
@@ -349,6 +358,8 @@ mod tests {
                 comment: Some("Does example things".into()),
                 categories: Some("Graphics;".into()),
                 startup_notify: false,
+                startup_wm_class: Some("example".into()),
+                startup_wm_class_auto: None,
                 asset_preference: Some("Example-x86_64.AppImage".into()),
                 added_at: Some(1_700_000_000),
                 commit_hash: Some("deadbeef".into()),

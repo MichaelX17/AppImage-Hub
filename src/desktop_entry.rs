@@ -68,6 +68,13 @@ fn sanitize_icon(value: &str) -> Option<String> {
     (!value.is_empty() && !value.chars().any(char::is_control)).then(|| value.to_string())
 }
 
+/// `StartupWMClass` is a free-form window-class string. Control characters are
+/// replaced centrally so a value cannot inject additional `.desktop` keys.
+fn sanitize_startup_wm_class(value: &str) -> Option<String> {
+    let value = sanitize_value(value);
+    (!value.is_empty()).then_some(value)
+}
+
 pub fn normalize_mime_types(raw: &str) -> Option<String> {
     let values: Vec<&str> = raw
         .split(';')
@@ -158,13 +165,24 @@ pub fn desktop_file_content(app: &AppEntry) -> String {
         }
     }
 
+    // Group the running window with this shortcut in the task manager. When
+    // the AppImage did not declare a class, the sanitized display name is a
+    // reasonable fallback and can be corrected in the edit form.
+    let startup_wm_class = app
+        .startup_wm_class
+        .as_deref()
+        .and_then(sanitize_startup_wm_class)
+        .unwrap_or_else(|| xdg::sanitize_name(&app.display_name));
+
     content.push_str(&format!(
         "Exec={}\n\
          Terminal=false\n\
          StartupNotify={}\n\
+         StartupWMClass={}\n\
          Categories={}\n",
         exec,
         if app.startup_notify { "true" } else { "false" },
+        startup_wm_class,
         categories,
     ));
 
@@ -568,6 +586,8 @@ mod tests {
             comment: None,
             categories: None,
             startup_notify: true,
+            startup_wm_class: None,
+            startup_wm_class_auto: None,
             asset_preference: None,
             added_at: None,
             commit_hash: None,
@@ -592,6 +612,36 @@ mod tests {
         assert!(content.contains("Comment=Sony PS2 Emulator\n"));
         assert!(content.contains("Categories=Game;Emulator;\n"));
         assert!(content.contains("StartupNotify=true\n"));
+    }
+
+    #[test]
+    fn desktop_file_content_includes_startup_wm_class() {
+        let mut app = sample_app(vec![]);
+        app.startup_wm_class = Some("pcsx2".into());
+        let content = desktop_file_content(&app);
+        assert!(content.contains("StartupWMClass=pcsx2\n"));
+    }
+
+    #[test]
+    fn desktop_file_content_falls_back_to_display_name_for_wm_class() {
+        let app = sample_app(vec![]);
+        let content = desktop_file_content(&app);
+        assert!(content.contains("StartupWMClass=test-app\n"));
+    }
+
+    #[test]
+    fn startup_wm_class_cannot_inject_keys() {
+        let mut app = sample_app(vec![]);
+        app.startup_wm_class = Some("Evil\nExec=sh -c bad".into());
+        let content = desktop_file_content(&app);
+        assert!(content.contains("StartupWMClass=Evil Exec=sh -c bad\n"));
+        assert_eq!(
+            content
+                .lines()
+                .filter(|line| line.starts_with("Exec="))
+                .count(),
+            1
+        );
     }
 
     #[test]
