@@ -139,6 +139,78 @@ fn update_checks_respect_cooldown() {
 }
 
 #[test]
+fn hub_update_robust_digest_comparison() {
+    // Hashes match (case insensitive, with or without sha256: prefix)
+    assert!(!hub_update_is_available_robust(
+        Some("d1dd5380924106a1f67f3e4390b24b6aa222506f118c939bdbd53355f884e139"),
+        Some("sha256:D1DD5380924106A1F67F3E4390B24B6AA222506F118C939BDBD53355F884E139"),
+        None,
+        12345,
+        10000,
+        Some(10000),
+    ));
+
+    // Hashes differ
+    assert!(hub_update_is_available_robust(
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        Some("sha256:d1dd5380924106a1f67f3e4390b24b6aa222506f118c939bdbd53355f884e139"),
+        None,
+        12345,
+        10000,
+        Some(10000),
+    ));
+}
+
+#[test]
+fn hub_update_robust_fallback_comparison() {
+    let saved_state = crate::config::HubUpdateState {
+        asset_id: 12345,
+        asset_size: 98765,
+        updated_at: Some("2026-11-20T15:25:18Z".into()),
+    };
+
+    // Digest is None, but saved id and size match remote and local file size -> up to date
+    assert!(!hub_update_is_available_robust(
+        None,
+        None,
+        Some(&saved_state),
+        12345,
+        98765,
+        Some(98765),
+    ));
+
+    // Digest is None, remote size changed -> update available
+    assert!(hub_update_is_available_robust(
+        None,
+        None,
+        Some(&saved_state),
+        12345,
+        99999,
+        Some(98765),
+    ));
+
+    // Digest is None, remote asset_id changed -> update available
+    assert!(hub_update_is_available_robust(
+        None,
+        None,
+        Some(&saved_state),
+        54321,
+        98765,
+        Some(98765),
+    ));
+
+    // Neither digest nor saved state -> update available
+    assert!(hub_update_is_available_robust(
+        None,
+        None,
+        None,
+        12345,
+        98765,
+        Some(98765),
+    ));
+}
+
+#[test]
 fn hub_update_uses_commit_hash_with_version_fallback() {
     assert!(!hub_update_available_with(
         "0123456789abcdef0123456789abcdef01234567",

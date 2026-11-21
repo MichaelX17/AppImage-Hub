@@ -83,6 +83,9 @@ pub struct Config {
     /// Unix timestamp of the last AppImage Hub self-update check.
     #[serde(default)]
     pub last_hub_update_check: Option<i64>,
+    /// State of the last successfully applied Hub self-update.
+    #[serde(default)]
+    pub last_hub_update: Option<HubUpdateState>,
     /// Create/update AppImage Hub's own Start Menu shortcut.
     #[serde(default = "default_true")]
     pub hub_start_menu_shortcut: bool,
@@ -102,6 +105,7 @@ impl Default for Config {
             auto_check_updates: default_auto_check_updates(),
             last_update_check: None,
             last_hub_update_check: None,
+            last_hub_update: None,
             hub_start_menu_shortcut: true,
             hub_start_menu_category: default_hub_category(),
             hub_desktop_shortcut: false,
@@ -119,6 +123,15 @@ fn default_true() -> bool {
 
 fn default_hub_category() -> String {
     "Utility".to_string()
+}
+
+/// Recorded metadata for the last self-update of AppImage Hub.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HubUpdateState {
+    pub asset_id: u64,
+    pub asset_size: u64,
+    #[serde(default)]
+    pub updated_at: Option<String>,
 }
 
 /// Cheap identity of the managed AppImage file.
@@ -377,6 +390,7 @@ mod tests {
             auto_check_updates: false,
             last_update_check: Some(1_700_000_002),
             last_hub_update_check: Some(1_700_000_003),
+            last_hub_update: None,
             hub_start_menu_shortcut: false,
             hub_start_menu_category: "Development".into(),
             hub_desktop_shortcut: true,

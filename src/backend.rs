@@ -1,9 +1,10 @@
-//! Background command loop, transfer pipeline, installs, update checks, and self-update.
+use anyhow::Context;
 use crate::app::{
-    apply_app_shortcuts, hub_update_is_available, now_unix, refresh_existing_shortcuts,
-    resolve_categories, token_is_present, update_check_cooldown_secs, BackendCommand, BackendEvent,
-    ChecksumStatus, OpKind, API_CONNECT_TIMEOUT, API_REQUEST_TIMEOUT, DOWNLOAD_CONNECT_TIMEOUT,
-    DOWNLOAD_IDLE_TIMEOUT, MAX_CONCURRENT_TRANSFERS, UPDATE_CHECK_TASK_TIMEOUT,
+    apply_app_shortcuts, current_appimage_path, hub_update_is_available_robust, now_unix,
+    refresh_existing_shortcuts, resolve_categories, token_is_present, update_check_cooldown_secs,
+    BackendCommand, BackendEvent, ChecksumStatus, OpKind, API_CONNECT_TIMEOUT, API_REQUEST_TIMEOUT,
+    DOWNLOAD_CONNECT_TIMEOUT, DOWNLOAD_IDLE_TIMEOUT, MAX_CONCURRENT_TRANSFERS,
+    UPDATE_CHECK_TASK_TIMEOUT,
 };
 use crate::appmeta;
 use crate::config::{AppEntry, AppSource, Config};
@@ -150,21 +151,100 @@ pub(crate) fn spawn_backend(
                         }
                     }
                     BackendCommand::CheckHubUpdate => {
+                        let octo_client = octo.clone();
                         let result = tokio::time::timeout(
                             API_REQUEST_TIMEOUT,
-                            github::fetch_latest_release_with_selector(
-                                &octo,
-                                "MichaelX17/AppImage-Hub",
-                                None,
-                            ),
+                            async move {
+                                let (owner, repo) = ("MichaelX17", "AppImage-Hub");
+                                let release_res: Result<octocrab::models::repos::Release, _> = octo_client
+                                    .repos(owner, repo)
+                                    .releases()
+                                    .get_by_tag("release")
+                                    .await;
+
+                                let release = match release_res {
+                                    Ok(r) => r,
+                                    Err(_) => {
+                                        // Fall back to get_latest if specific tag "release" is not found
+                                        octo_client
+                                            .repos(owner, repo)
+                                            .releases()
+                                            .get_latest()
+                                            .await
+                                            .with_context(|| "failed to fetch release for MichaelX17/AppImage-Hub")?
+                                    }
+                                };
+
+                                let target_asset = release
+                                    .assets
+                                    .iter()
+                                    .find(|a| github::is_valid_appimage_asset(&a.name))
+                                    .cloned()
+                                    .ok_or_else(|| anyhow::anyhow!("no .AppImage asset found in release"))?;
+
+                                // Query the raw asset JSON from releases API endpoint to obtain the "digest" field if present.
+                                let asset_id_val = target_asset.id.0;
+                                let route = format!("/repos/{owner}/{repo}/releases/assets/{asset_id_val}");
+                                let raw_asset: Result<serde_json::Value, _> = octo_client.get(route, None::<&()>).await;
+                                let mut raw_digest: Option<String> = None;
+                                let mut raw_updated_at: Option<String> = None;
+
+                                if let Ok(val) = raw_asset {
+                                    if let Some(d) = val.get("digest").and_then(|v| v.as_str()) {
+                                        raw_digest = Some(d.to_string());
+                                    }
+                                    if let Some(u) = val.get("updated_at").and_then(|v| v.as_str()) {
+                                        raw_updated_at = Some(u.to_string());
+                                    }
+                                }
+
+                                Ok::<_, anyhow::Error>((target_asset, raw_digest, raw_updated_at))
+                            },
                         )
                         .await;
+
                         match result {
-                            Ok(Ok(info)) => {
-                                if hub_update_is_available(&info.commit_hash, &info.tag) {
+                            Ok(Ok((asset, digest, updated_at))) => {
+                                let local_path = current_appimage_path();
+                                let (local_hash, local_size) = if let Some(ref path) = local_path {
+                                    let path_clone = path.clone();
+                                    tokio::task::spawn_blocking(move || {
+                                        let hash = crate::config::sha256_file(&path_clone);
+                                        let size = std::fs::metadata(&path_clone).map(|m| m.len()).ok();
+                                        (hash, size)
+                                    })
+                                    .await
+                                    .unwrap_or((None, None))
+                                } else {
+                                    (None, None)
+                                };
+
+                                let last_state = config
+                                    .lock()
+                                    .ok()
+                                    .and_then(|cfg| cfg.last_hub_update.clone());
+
+                                let asset_id = asset.id.0;
+                                let asset_size = asset.size as u64;
+                                let download_url = asset.browser_download_url.to_string();
+
+                                let update_available = hub_update_is_available_robust(
+                                    local_hash.as_deref(),
+                                    digest.as_deref(),
+                                    last_state.as_ref(),
+                                    asset_id,
+                                    asset_size,
+                                    local_size,
+                                );
+
+                                if update_available {
                                     let _ = evt_tx
                                         .send(BackendEvent::HubUpdateAvailable {
-                                            url: info.download_url,
+                                            url: download_url,
+                                            expected_digest: digest,
+                                            asset_id,
+                                            asset_size,
+                                            updated_at,
                                         })
                                         .await;
                                 } else {
@@ -190,6 +270,10 @@ pub(crate) fn spawn_backend(
                     BackendCommand::SelfUpdate {
                         url,
                         target,
+                        expected_digest,
+                        asset_id,
+                        asset_size,
+                        updated_at,
                         cancel,
                     } => {
                         if handles.contains_key("self-update") {
@@ -203,6 +287,7 @@ pub(crate) fn spawn_backend(
                         let evt_tx = evt_tx.clone();
                         let http = http.clone();
                         let transfers = transfers.clone();
+                        let config = config.clone();
                         handles.insert(
                             "self-update".to_string(),
                             tokio::spawn(async move {
@@ -210,7 +295,19 @@ pub(crate) fn spawn_backend(
                                     Ok(permit) => permit,
                                     Err(_) => return,
                                 };
-                                run_self_update(http, url, target, cancel, evt_tx).await;
+                                run_self_update(
+                                    http,
+                                    config,
+                                    url,
+                                    target,
+                                    expected_digest,
+                                    asset_id,
+                                    asset_size,
+                                    updated_at,
+                                    cancel,
+                                    evt_tx,
+                                )
+                                .await;
                             }),
                         );
                     }

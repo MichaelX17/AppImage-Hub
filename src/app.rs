@@ -50,6 +50,10 @@ pub enum BackendCommand {
     SelfUpdate {
         url: String,
         target: PathBuf,
+        expected_digest: Option<String>,
+        asset_id: u64,
+        asset_size: u64,
+        updated_at: Option<String>,
         cancel: Arc<AtomicBool>,
     },
     DownloadAndReplace {
@@ -110,6 +114,10 @@ pub enum BackendEvent {
     },
     HubUpdateAvailable {
         url: String,
+        expected_digest: Option<String>,
+        asset_id: u64,
+        asset_size: u64,
+        updated_at: Option<String>,
     },
     HubUpToDate,
     HubUpdateProgress {
@@ -359,6 +367,10 @@ pub struct ManagerApp {
     pub(crate) sort_by: AppSortBy,
     pub(crate) update_check: Option<UpdateCheckProgress>,
     pub(crate) hub_update_url: Option<String>,
+    pub(crate) hub_update_digest: Option<String>,
+    pub(crate) hub_update_asset_id: Option<u64>,
+    pub(crate) hub_update_asset_size: Option<u64>,
+    pub(crate) hub_update_updated_at: Option<String>,
     pub(crate) hub_update_progress: Option<f32>,
     hub_update_check_started: bool,
     /// Whether a GitHub token is configured. Authenticated checks may run on a
@@ -517,6 +529,10 @@ impl ManagerApp {
             sort_by: AppSortBy::Name,
             update_check: None,
             hub_update_url: None,
+            hub_update_digest: None,
+            hub_update_asset_id: None,
+            hub_update_asset_size: None,
+            hub_update_updated_at: None,
             hub_update_progress: None,
             hub_update_check_started: false,
             has_github_token,

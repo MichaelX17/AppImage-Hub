@@ -53,11 +53,25 @@ impl ManagerApp {
                 self.latest_versions.insert(app_id.clone(), tag);
                 self.update_available.remove(&app_id);
             }
-            BackendEvent::HubUpdateAvailable { url } => {
+            BackendEvent::HubUpdateAvailable {
+                url,
+                expected_digest,
+                asset_id,
+                asset_size,
+                updated_at,
+            } => {
                 self.hub_update_url = Some(url);
+                self.hub_update_digest = expected_digest;
+                self.hub_update_asset_id = Some(asset_id);
+                self.hub_update_asset_size = Some(asset_size);
+                self.hub_update_updated_at = updated_at;
             }
             BackendEvent::HubUpToDate => {
                 self.hub_update_url = None;
+                self.hub_update_digest = None;
+                self.hub_update_asset_id = None;
+                self.hub_update_asset_size = None;
+                self.hub_update_updated_at = None;
             }
             BackendEvent::HubUpdateProgress { fraction } => {
                 self.hub_update_progress = Some(fraction.clamp(0.0, 1.0));

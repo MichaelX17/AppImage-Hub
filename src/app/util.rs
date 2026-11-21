@@ -8,6 +8,7 @@ pub(crate) fn current_appimage_path() -> Option<PathBuf> {
         .or_else(|| std::env::current_exe().ok())
 }
 
+#[allow(dead_code)]
 pub(crate) fn hub_update_is_available(remote_commit: &str, remote_tag: &str) -> bool {
     hub_update_available_with(
         env!("APPIMAGE_HUB_COMMIT"),
@@ -17,6 +18,7 @@ pub(crate) fn hub_update_is_available(remote_commit: &str, remote_tag: &str) -> 
     )
 }
 
+#[allow(dead_code)]
 pub(crate) fn hub_update_available_with(
     local_commit: &str,
     remote_commit: &str,
@@ -31,6 +33,45 @@ pub(crate) fn hub_update_available_with(
     // Source builds without git metadata fall back to the package version.
     let remote = remote_tag.trim().trim_start_matches('v');
     remote != current_version.trim()
+}
+
+/// Determines whether an update is available for AppImage Hub using SHA-256 digest
+/// comparison or fallback ID/size comparison.
+pub(crate) fn hub_update_is_available_robust(
+    local_hash: Option<&str>,
+    remote_digest: Option<&str>,
+    last_state: Option<&crate::config::HubUpdateState>,
+    remote_asset_id: u64,
+    remote_asset_size: u64,
+    local_file_size: Option<u64>,
+) -> bool {
+    if let (Some(local_h), Some(remote_d)) = (local_hash, remote_digest) {
+        let clean_remote = remote_d.trim().strip_prefix("sha256:").unwrap_or(remote_d.trim()).trim();
+        let local_norm = local_h.trim().to_ascii_lowercase();
+        let remote_norm = clean_remote.to_ascii_lowercase();
+        eprintln!(
+            "[CheckHubUpdate] Comparing hashes: local={}, remote={}",
+            local_norm, remote_norm
+        );
+        return local_norm != remote_norm;
+    }
+
+    // Fallback comparison: if remote digest is missing or local binary could not be hashed.
+    if let Some(state) = last_state {
+        let id_matches = state.asset_id == remote_asset_id;
+        let size_matches = local_file_size
+            .map(|sz| sz == remote_asset_size)
+            .unwrap_or(state.asset_size == remote_asset_size);
+        eprintln!(
+            "[CheckHubUpdate] Fallback comparison: saved_id={}, remote_id={}, local_size={:?}, remote_size={}",
+            state.asset_id, remote_asset_id, local_file_size, remote_asset_size
+        );
+        !(id_matches && size_matches)
+    } else {
+        // No hash and no saved fallback state: assume update is available.
+        eprintln!("[CheckHubUpdate] Neither digest nor fallback state available, triggering update");
+        true
+    }
 }
 
 pub(crate) fn check_updates_button(

@@ -740,10 +740,19 @@ impl ManagerApp {
             self.status = Some("Cannot determine the running AppImage path.".into());
             return;
         };
+        let expected_digest = self.hub_update_digest.clone();
+        let asset_id = self.hub_update_asset_id.unwrap_or(0);
+        let asset_size = self.hub_update_asset_size.unwrap_or(0);
+        let updated_at = self.hub_update_updated_at.clone();
+
         self.hub_update_progress = Some(0.0);
         self.send_cmd(BackendCommand::SelfUpdate {
             url,
             target,
+            expected_digest,
+            asset_id,
+            asset_size,
+            updated_at,
             cancel: Arc::new(AtomicBool::new(false)),
         });
     }
