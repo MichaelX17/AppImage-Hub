@@ -19,8 +19,8 @@ pub fn render(ctx: &egui::Context, mgr: &mut ManagerApp, size_class: SizeClass) 
     egui::TopBottomPanel::bottom("status_footer")
         .frame(
             egui::Frame::NONE
-                .fill(theme::SURFACE)
-                .stroke(Stroke::new(1.0_f32, theme::BORDER))
+                .fill(theme::surface())
+                .stroke(Stroke::new(1.0_f32, theme::border()))
                 .inner_margin(Margin::symmetric(
                     theme::SPACE_LG as i8,
                     theme::SPACE_SM as i8,
@@ -60,7 +60,7 @@ fn render_progress(ui: &mut egui::Ui, mgr: &mut ManagerApp, size_class: SizeClas
             ui.label(
                 RichText::new("Progress")
                     .strong()
-                    .color(theme::TEXT_PRIMARY),
+                    .color(theme::text_primary()),
             );
             ui.label(theme::muted_label(active_count_label(ops.len())).size(12.0));
             if ops.len() > 1 {
@@ -119,7 +119,7 @@ fn render_active_row(ui: &mut egui::Ui, op: &ActiveOp, cancel_id: &mut Option<St
                 op.label.as_str()
             };
             ui.add(
-                egui::Label::new(RichText::new(title).strong().color(theme::TEXT_PRIMARY))
+                egui::Label::new(RichText::new(title).strong().color(theme::text_primary()))
                     .truncate(),
             )
             .on_hover_text(title);
@@ -149,7 +149,7 @@ fn render_active_row(ui: &mut egui::Ui, op: &ActiveOp, cancel_id: &mut Option<St
         ui.add(
             egui::ProgressBar::new(fraction)
                 .text(RichText::new(detail).size(11.0))
-                .fill(theme::ACCENT)
+                .fill(theme::accent())
                 .desired_height(18.0),
         );
     });
@@ -167,7 +167,7 @@ fn render_failed_rows(
         ui.separator();
     }
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Failed").strong().color(theme::TEXT_PRIMARY));
+        ui.label(RichText::new("Failed").strong().color(theme::text_primary()));
         ui.label(theme::muted_label(failed_count_label(failed.len())).size(12.0));
     });
     ui.add_space(theme::SPACE_XS);
@@ -182,13 +182,13 @@ fn render_failed_rows(
                 egui::Label::new(
                     RichText::new(&f.label)
                         .strong()
-                        .color(theme::TEXT_PRIMARY)
+                        .color(theme::text_primary())
                         .size(12.0),
                 )
                 .truncate(),
             );
             ui.add(
-                egui::Label::new(RichText::new(&f.message).color(theme::DANGER).size(12.0))
+                egui::Label::new(RichText::new(&f.message).color(theme::danger()).size(12.0))
                     .truncate(),
             )
             .on_hover_text(&f.message);
@@ -210,9 +210,9 @@ fn render_failed_rows(
 
 fn activity_frame(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
-        .fill(theme::SURFACE_RAISED)
-        .stroke(Stroke::new(1.0_f32, theme::BORDER))
-        .corner_radius(CornerRadius::same(theme::RADIUS_MD))
+        .fill(theme::surface_raised())
+        .stroke(Stroke::new(1.0_f32, theme::border()))
+        .corner_radius(CornerRadius::same(theme::radius_md()))
         .inner_margin(Margin::same(theme::SPACE_SM as i8))
         .show(ui, add_contents);
 }
@@ -237,7 +237,7 @@ fn render_status_bar(
                     RichText::new(count_text)
                         .size(12.0)
                         .strong()
-                        .color(theme::TEXT_SECONDARY),
+                        .color(theme::text_secondary()),
                 );
                 ui.label(theme::muted_label(checked_text).size(12.0));
             });
@@ -253,7 +253,7 @@ fn render_status_bar(
             RichText::new(count_text)
                 .size(12.0)
                 .strong()
-                .color(theme::TEXT_SECONDARY),
+                .color(theme::text_secondary()),
         );
         ui.add_space(theme::SPACE_SM);
         ui.separator();
@@ -271,7 +271,7 @@ fn sort_selector(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
         .selected_text(
             RichText::new(format!("Sort: {}", mgr.sort_by.label()))
                 .size(12.0)
-                .color(theme::TEXT_SECONDARY),
+                .color(theme::text_secondary()),
         )
         .width(132.0)
         .show_ui(ui, |ui| {

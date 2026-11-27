@@ -7,7 +7,9 @@
 //! All backend interactions are funneled through [`CardActions`] so the card is
 //! rendered first and `ManagerApp` is mutated afterwards (no borrow conflicts).
 
-use crate::app::{AppDownloadState, AppSortBy, CachedAppMeta, LocalFileIssue, ManagerApp};
+use crate::app::{
+    AppDownloadState, AppSortBy, CachedAppMeta, LocalFileIssue, ManagerApp, NavFilter,
+};
 use crate::config::{AppEntry, AppSource};
 use crate::ui::breakpoints::SizeClass;
 use crate::ui::theme::{self, BadgeKind};
@@ -64,7 +66,33 @@ pub(crate) fn render(
         return;
     }
 
-    let mut sorted_apps: Vec<&AppEntry> = apps.iter().collect();
+    let query = mgr.search_query.trim().to_lowercase();
+    let nav_filter = mgr.nav_filter;
+    let mut sorted_apps: Vec<&AppEntry> = apps
+        .iter()
+        .filter(|app| {
+            let matches_nav = match nav_filter {
+                NavFilter::All => true,
+                NavFilter::Updates => mgr.update_available.contains_key(&app.id),
+                NavFilter::Github => !matches!(app.source, AppSource::LocalOnly),
+                NavFilter::Local => matches!(app.source, AppSource::LocalOnly),
+            };
+            if !matches_nav {
+                return false;
+            }
+            if query.is_empty() {
+                return true;
+            }
+            app.display_name.to_lowercase().contains(&query)
+                || source_text(app).is_some_and(|repo| repo.to_lowercase().contains(&query))
+        })
+        .collect();
+
+    if sorted_apps.is_empty() {
+        render_filtered_empty_state(ui, mgr);
+        return;
+    }
+
     sort_apps(&mut sorted_apps, meta, mgr.sort_by);
 
     egui::ScrollArea::vertical()
@@ -141,29 +169,50 @@ fn source_rank(app: &AppEntry) -> u8 {
     }
 }
 
+fn render_filtered_empty_state(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(64.0);
+        ui.label(
+            RichText::new("No matching AppImages")
+                .size(20.0)
+                .strong()
+                .color(theme::text_primary()),
+        );
+        ui.add_space(theme::SPACE_XS);
+        ui.label(theme::muted_label(
+            "Try clearing your search or switching to All Apps.",
+        ));
+        ui.add_space(theme::SPACE_MD);
+        if ui.add(theme::secondary_button("Show All Apps")).clicked() {
+            mgr.search_query.clear();
+            mgr.nav_filter = NavFilter::All;
+        }
+    });
+}
+
 fn render_empty_state(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
     ui.vertical_centered(|ui| {
         ui.add_space(56.0);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(76.0, 76.0), Sense::hover());
         let center = rect.center();
-        ui.painter().circle_filled(center, 38.0, theme::ACCENT_SOFT);
+        ui.painter().circle_filled(center, 38.0, theme::accent_soft());
         ui.painter()
-            .circle_stroke(center, 38.0, Stroke::new(1.5_f32, theme::ACCENT));
+            .circle_stroke(center, 38.0, Stroke::new(1.5_f32, theme::accent()));
         let arm = 13.0;
         ui.painter().line_segment(
             [center - egui::vec2(arm, 0.0), center + egui::vec2(arm, 0.0)],
-            Stroke::new(2.5_f32, theme::ACCENT_HOVER),
+            Stroke::new(2.5_f32, theme::accent()),
         );
         ui.painter().line_segment(
             [center - egui::vec2(0.0, arm), center + egui::vec2(0.0, arm)],
-            Stroke::new(2.5_f32, theme::ACCENT_HOVER),
+            Stroke::new(2.5_f32, theme::accent()),
         );
         ui.add_space(theme::SPACE_MD);
         ui.label(
             RichText::new("No AppImages managed yet")
                 .size(22.0)
                 .strong()
-                .color(theme::TEXT_PRIMARY),
+                .color(theme::text_primary()),
         );
         ui.add_space(theme::SPACE_XS);
         ui.label(theme::muted_label(
@@ -409,7 +458,7 @@ fn render_info_block(
             RichText::new(&app.display_name)
                 .size(layout.name_size)
                 .strong()
-                .color(theme::TEXT_PRIMARY),
+                .color(theme::text_primary()),
         )
         .truncate(),
     );
@@ -431,26 +480,26 @@ fn render_info_block(
     let file_issue = mgr.file_issues.get(&app.id).copied();
     let (current, current_text_color) = match file_issue {
         // The metadata no longer describes the file on disk.
-        Some(LocalFileIssue::Missing) => ("missing".to_string(), theme::DANGER),
-        Some(LocalFileIssue::Changed) => ("modified".to_string(), theme::WARNING),
+        Some(LocalFileIssue::Missing) => ("missing".to_string(), theme::danger()),
+        Some(LocalFileIssue::Changed) => ("modified".to_string(), theme::warning()),
         None if app.current_version.trim().is_empty() => {
-            ("unknown".to_string(), theme::TEXT_SECONDARY)
+            ("unknown".to_string(), theme::text_secondary())
         }
-        None => (app.current_version.clone(), theme::TEXT_SECONDARY),
+        None => (app.current_version.clone(), theme::text_secondary()),
     };
     let current_dot_color = match file_issue {
-        Some(LocalFileIssue::Missing) => theme::DANGER,
-        Some(LocalFileIssue::Changed) => theme::WARNING,
-        None => theme::TEXT_MUTED,
+        Some(LocalFileIssue::Missing) => theme::danger(),
+        Some(LocalFileIssue::Changed) => theme::warning(),
+        None => theme::text_muted(),
     };
     let latest_known = latest_tag
         .map(|tag| tag.to_string())
         .or_else(|| mgr.latest_versions.get(&app.id).cloned());
 
     let (latest_text, latest_color) = match &latest_known {
-        Some(tag) if has_update => (tag.clone(), theme::ACCENT_HOVER),
-        Some(tag) => (tag.clone(), theme::SUCCESS),
-        None => ("unknown".to_string(), theme::TEXT_MUTED),
+        Some(tag) if has_update => (tag.clone(), theme::detail()),
+        Some(tag) => (tag.clone(), theme::success()),
+        None => ("unknown".to_string(), theme::text_muted()),
     };
 
     ui.horizontal_wrapped(|ui| {
@@ -571,7 +620,7 @@ fn render_failed(
     can_retry: bool,
     retry_app: &mut bool,
 ) {
-    ui.add(egui::Label::new(RichText::new(msg).color(theme::DANGER).size(12.0)).truncate())
+    ui.add(egui::Label::new(RichText::new(msg).color(theme::danger()).size(12.0)).truncate())
         .on_hover_text(msg);
     ui.add_space(theme::SPACE_XS);
     let w = if layout.compact {
@@ -606,7 +655,7 @@ fn render_idle_actions(
             // Idle primary action: Launch
             let launch = ui.add(theme::primary_button("Launch"));
             if launch.hovered() {
-                theme::draw_glow(ui, launch.rect, theme::RADIUS_PILL, theme::ACCENT);
+                theme::draw_glow(ui, launch.rect, theme::RADIUS_PILL, theme::accent());
             }
             if launch.clicked() {
                 actions.launch = true;
@@ -628,7 +677,7 @@ fn run_action_selector(ui: &mut egui::Ui, actions: &mut CardActions) {
             RichText::new("Run...")
                 .size(13.0)
                 .strong()
-                .color(theme::TEXT_PRIMARY),
+                .color(theme::text_primary()),
         )
         .width(104.0)
         .show_ui(ui, |ui| {
@@ -679,13 +728,13 @@ fn render_icon(ui: &mut egui::Ui, app: &AppEntry, size: f32) {
         return;
     }
 
-    let rounding = egui::CornerRadius::same(theme::RADIUS_LG);
+    let rounding = egui::CornerRadius::same(theme::radius_lg());
     ui.painter()
-        .rect_filled(rect, rounding, theme::SURFACE_RAISED);
+        .rect_filled(rect, rounding, theme::surface_raised());
     ui.painter().rect_stroke(
         rect,
         rounding,
-        Stroke::new(1.0_f32, theme::BORDER),
+        Stroke::new(1.0_f32, theme::border()),
         egui::StrokeKind::Inside,
     );
 
@@ -731,7 +780,7 @@ fn render_icon(ui: &mut egui::Ui, app: &AppEntry, size: f32) {
         egui::Align2::CENTER_CENTER,
         initial,
         egui::FontId::proportional((size * 0.42).max(1.0)),
-        theme::ACCENT_HOVER,
+        theme::detail(),
     );
 }
 

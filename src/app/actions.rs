@@ -227,7 +227,7 @@ impl ManagerApp {
 
     pub(crate) fn open_add_form(&mut self) {
         self.add_to = None;
-        self.close_settings();
+        self.close_settings_state();
         self.side_panel_form.clear();
         self.status = None;
         self.is_form_open = true;
@@ -325,7 +325,7 @@ impl ManagerApp {
         }
 
         self.add_to = None;
-        self.close_settings();
+        self.close_settings_state();
         let asset_selection_mode = if entry.asset_preference.is_some() {
             crate::ui::side_panel::AssetSelectionMode::Manual
         } else {
@@ -442,7 +442,7 @@ impl ManagerApp {
 
     pub(crate) fn open_add_to(&mut self, app: &AppEntry) {
         self.is_form_open = false;
-        self.close_settings();
+        self.close_settings_state();
         self.side_panel_form.clear();
         self.add_to = Some(AddToState {
             app_id: app.id.clone(),
@@ -464,18 +464,24 @@ impl ManagerApp {
         self.add_to = None;
     }
 
-    /// Closes the settings panel and wipes the plaintext token from the form
-    /// state. The token may still live in the backend copy used for API calls,
-    /// but no UI copy survives after the panel closes.
-    pub(crate) fn close_settings(&mut self) {
+    fn close_settings_state(&mut self) {
         use zeroize::Zeroize as _;
         self.settings_form.github_token.zeroize();
         self.settings_form.show_token = false;
         self.show_settings = false;
     }
 
+    /// Closes the settings screen, wipes the plaintext token from the form
+    /// state, and restores the persisted theme if changes were not saved.
+    pub(crate) fn close_settings(&mut self, ctx: &egui::Context) {
+        self.close_settings_state();
+        if let Ok(cfg) = self.config.lock() {
+            crate::ui::theme::apply_theme(ctx, &cfg.theme);
+        }
+    }
+
     pub(crate) fn open_settings(&mut self) {
-        let (apps_dir, auto_check_updates, hub_start_menu, hub_category, hub_desktop) = self
+        let (apps_dir, auto_check_updates, hub_start_menu, hub_category, hub_desktop, theme) = self
             .config
             .lock()
             .map(|cfg| {
@@ -489,6 +495,7 @@ impl ManagerApp {
                     cfg.hub_start_menu_shortcut,
                     cfg.hub_start_menu_category.clone(),
                     cfg.hub_desktop_shortcut,
+                    cfg.theme.clone(),
                 )
             })
             .unwrap_or_else(|_| {
@@ -498,13 +505,17 @@ impl ManagerApp {
                     true,
                     "Utility".to_string(),
                     false,
+                    crate::config::ThemeSettings::default(),
                 )
             });
         let github_token = crate::secrets::load_github_token()
             .or_else(|| std::env::var("GITHUB_TOKEN").ok())
             .or_else(|| std::env::var("GH_TOKEN").ok())
             .unwrap_or_default();
+        let active_tab = self.settings_form.active_tab;
         self.settings_form = crate::ui::settings_panel::SettingsFormState {
+            active_tab,
+            theme,
             apps_dir,
             auto_check_updates,
             hub_start_menu_shortcut: hub_start_menu,
@@ -516,22 +527,25 @@ impl ManagerApp {
         self.is_form_open = false;
         self.add_to = None;
         self.show_settings = true;
-        self.show_side_panel = true;
     }
 
-    pub(crate) fn save_settings(&mut self) {
-        self.save_settings_inner(false);
+    pub(crate) fn save_settings(&mut self, ctx: &egui::Context) {
+        self.save_settings_inner(ctx, false);
     }
 
     /// Applies a storage-folder change the user confirmed in the modal.
-    pub(crate) fn confirm_storage_change(&mut self) {
+    pub(crate) fn confirm_storage_change(&mut self, ctx: &egui::Context) {
         if let Some(path) = self.pending_storage_change.take() {
             self.settings_form.apps_dir = path.display().to_string();
-            self.save_settings_inner(true);
+            self.save_settings_inner(ctx, true);
         }
     }
 
-    pub(crate) fn save_settings_inner(&mut self, storage_change_confirmed: bool) {
+    pub(crate) fn save_settings_inner(
+        &mut self,
+        ctx: &egui::Context,
+        storage_change_confirmed: bool,
+    ) {
         let path = PathBuf::from(self.settings_form.apps_dir.trim());
         if path.as_os_str().is_empty() {
             self.status = Some("Choose an AppImage storage folder.".into());
@@ -561,12 +575,14 @@ impl ManagerApp {
         let hub_menu = self.settings_form.hub_start_menu_shortcut;
         let hub_category = self.settings_form.hub_start_menu_category.clone();
         let hub_desktop = self.settings_form.hub_desktop_shortcut;
+        let theme = self.settings_form.theme.clone();
         let saved = if let Ok(mut cfg) = self.config.lock() {
             cfg.custom_download_dir = Some(path.clone());
             cfg.auto_check_updates = auto_check;
             cfg.hub_start_menu_shortcut = hub_menu;
             cfg.hub_start_menu_category = hub_category.clone();
             cfg.hub_desktop_shortcut = hub_desktop;
+            cfg.theme = theme.clone();
             cfg.save()
         } else {
             Err(anyhow::anyhow!("configuration lock is poisoned"))
@@ -575,6 +591,7 @@ impl ManagerApp {
             self.status = Some(format!("failed to save settings: {e:#}"));
             return;
         }
+        crate::ui::theme::apply_theme(ctx, &theme);
         desktop_entry::sync_hub_shortcuts(hub_menu, hub_desktop, &hub_category);
 
         let token = zeroize::Zeroizing::new(self.settings_form.github_token.trim().to_string());
@@ -589,7 +606,7 @@ impl ManagerApp {
             Some(token.to_string())
         }));
         let report = self.sync_metadata_files();
-        self.close_settings();
+        self.close_settings(ctx);
         let mut message = format!("Settings saved. AppImages folder: {}", path.display());
         if report.adopted > 0 {
             message.push_str(&format!(". Found {} existing app(s)", report.adopted));

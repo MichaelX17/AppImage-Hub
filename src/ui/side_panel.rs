@@ -20,7 +20,7 @@ fn form_text_input(
     ui.add_sized(
         [width, FORM_INPUT_HEIGHT],
         egui::TextEdit::singleline(value)
-            .hint_text(RichText::new(hint).color(theme::with_alpha(theme::TEXT_MUTED, 180)))
+            .hint_text(RichText::new(hint).color(theme::with_alpha(theme::text_muted(), 180)))
             .margin(Margin::symmetric(12, 10))
             .vertical_align(Align::Center)
             .desired_width(width),
@@ -32,33 +32,33 @@ fn form_primary_button(text: impl Into<String>) -> egui::Button<'static> {
         RichText::new(text.into())
             .size(15.0)
             .strong()
-            .color(Color32::WHITE),
+            .color(theme::on_accent()),
     )
-    .fill(theme::ACCENT)
-    .stroke(Stroke::new(1.0_f32, theme::ACCENT_HOVER))
-    .corner_radius(CornerRadius::same(theme::RADIUS_MD))
+    .fill(theme::accent())
+    .stroke(Stroke::NONE)
+    .corner_radius(CornerRadius::same(theme::radius_md()))
 }
 
 fn form_secondary_button(text: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(
         RichText::new(text.into())
             .size(13.0)
-            .color(theme::TEXT_PRIMARY),
+            .color(theme::text_primary()),
     )
-    .fill(theme::SURFACE_RAISED)
-    .stroke(Stroke::new(1.0_f32, theme::BORDER))
-    .corner_radius(CornerRadius::same(theme::RADIUS_MD))
+    .fill(theme::surface_raised())
+    .stroke(Stroke::new(1.0_f32, theme::border()))
+    .corner_radius(CornerRadius::same(theme::radius_md()))
 }
 
 fn form_ghost_button(text: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(
         RichText::new(text.into())
             .size(13.0)
-            .color(theme::TEXT_SECONDARY),
+            .color(theme::text_secondary()),
     )
     .fill(Color32::TRANSPARENT)
     .stroke(Stroke::NONE)
-    .corner_radius(CornerRadius::same(theme::RADIUS_MD))
+    .corner_radius(CornerRadius::same(theme::radius_md()))
 }
 
 #[derive(Default, Clone, PartialEq, Eq)]
@@ -225,7 +225,7 @@ pub fn render(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeClass) {
         let can_save = validation.is_none();
 
         if let Some(msg) = validation {
-            ui.label(RichText::new(msg).color(theme::DANGER).size(12.0));
+            ui.label(RichText::new(msg).color(theme::danger()).size(12.0));
         } else {
             ui.label(theme::muted_label("All required fields are complete.").size(11.0));
         }
@@ -263,9 +263,9 @@ pub fn render(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeClass) {
 fn render_header(ui: &mut egui::Ui, title: &str) {
     ui.label(
         RichText::new(title)
-            .size(32.0)
+            .size(28.0)
             .strong()
-            .color(theme::TEXT_PRIMARY),
+            .color(theme::text_primary()),
     );
     ui.add_space(theme::SPACE_XS);
     ui.label(
@@ -292,9 +292,9 @@ pub fn render_add_to(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeC
 
         ui.label(
             RichText::new("Add to…")
-                .size(32.0)
+                .size(28.0)
                 .strong()
-                .color(theme::TEXT_PRIMARY),
+                .color(theme::text_primary()),
         );
         ui.add_space(theme::SPACE_XS);
         ui.label(
@@ -356,9 +356,9 @@ pub fn render_add_to(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeC
 
 fn shortcut_target(ui: &mut egui::Ui, label: &str, path: &Path) {
     egui::Frame::new()
-        .fill(theme::SURFACE_RAISED)
-        .stroke(Stroke::new(1.0_f32, theme::BORDER))
-        .corner_radius(CornerRadius::same(theme::RADIUS_MD))
+        .fill(theme::surface_raised())
+        .stroke(Stroke::new(1.0_f32, theme::border()))
+        .corner_radius(CornerRadius::same(theme::radius_md()))
         .inner_margin(Margin::symmetric(12, 9))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -370,7 +370,7 @@ fn shortcut_target(ui: &mut egui::Ui, label: &str, path: &Path) {
                             RichText::new("exists")
                                 .size(10.0)
                                 .strong()
-                                .color(theme::ACCENT_HOVER),
+                                .color(theme::detail()),
                         );
                     }
                 });
@@ -400,7 +400,7 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
         egui::TextEdit::singleline(&mut mgr.side_panel_form.display_name)
             .hint_text(
                 RichText::new("Application name (e.g. PCSX2)")
-                    .color(theme::with_alpha(theme::TEXT_MUTED, 180)),
+                    .color(theme::with_alpha(theme::text_muted(), 180)),
             )
             .char_limit(DISPLAY_NAME_LIMIT)
             .margin(Margin::symmetric(12, 10))
@@ -417,9 +417,9 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
         |ui| {
             let used = mgr.side_panel_form.display_name.chars().count();
             let color = if used >= DISPLAY_NAME_LIMIT {
-                theme::WARNING
+                theme::warning()
             } else {
-                theme::TEXT_MUTED
+                theme::text_muted()
             };
             ui.label(
                 RichText::new(format!("{used}/{DISPLAY_NAME_LIMIT}"))
@@ -685,7 +685,7 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
                 ui.add(
                     egui::Image::new(uri)
                         .fit_to_exact_size(egui::vec2(26.0, 26.0))
-                        .corner_radius(CornerRadius::same(theme::RADIUS_SM)),
+                        .corner_radius(CornerRadius::same(theme::radius_sm())),
                 );
                 ui.add_space(theme::SPACE_XS);
             }
@@ -773,7 +773,7 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
                 });
 
                 if let Some(ref err) = mgr.side_panel_form.fetch_assets_error {
-                    ui.label(RichText::new(err).color(theme::DANGER).size(11.0));
+                    ui.label(RichText::new(err).color(theme::danger()).size(11.0));
                 }
 
                 if !mgr.side_panel_form.available_assets.is_empty() {
@@ -832,7 +832,7 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
     egui::CollapsingHeader::new(
         RichText::new("Launch Args")
             .strong()
-            .color(theme::TEXT_PRIMARY),
+            .color(theme::text_primary()),
     )
     .id_salt("launch_args_accordion")
     .default_open(false)
@@ -876,7 +876,7 @@ fn form_touched(form: &SidePanelFormState) -> bool {
 /// Red inline validation message shown directly below the offending field.
 fn required_hint(ui: &mut egui::Ui, show: bool, message: &str) {
     if show {
-        ui.label(RichText::new(message).color(theme::DANGER).size(11.0));
+        ui.label(RichText::new(message).color(theme::danger()).size(11.0));
     }
 }
 
@@ -910,21 +910,21 @@ fn segmented_row(ui: &mut egui::Ui, labels: &[&str], selected: usize) -> Option<
 fn segment_button(label: &str, selected: bool) -> egui::Button<'static> {
     let (fill, color, stroke) = if selected {
         (
-            theme::ACCENT,
-            Color32::WHITE,
-            Stroke::new(1.0_f32, theme::ACCENT_HOVER),
+            theme::accent(),
+            theme::on_accent(),
+            Stroke::NONE,
         )
     } else {
         (
-            theme::SURFACE_RAISED,
-            theme::TEXT_SECONDARY,
-            Stroke::new(1.0_f32, theme::BORDER),
+            theme::surface_raised(),
+            theme::text_secondary(),
+            Stroke::new(1.0_f32, theme::border()),
         )
     };
     egui::Button::new(RichText::new(label).size(13.0).strong().color(color))
         .fill(fill)
         .stroke(stroke)
-        .corner_radius(CornerRadius::same(theme::RADIUS_MD))
+        .corner_radius(CornerRadius::same(theme::radius_md()))
 }
 fn validation_message(form: &SidePanelFormState) -> Option<&'static str> {
     if form.display_name.trim().is_empty() {

@@ -1,49 +1,120 @@
-//! Top bar and Actions menu rendering.
+//! Top bar (ytm-rs-inspired pill search + responsive action bar).
 use super::*;
+use crate::ui::theme;
+
 impl ManagerApp {
-    pub(crate) fn render_top_bar(&mut self, ui: &mut egui::Ui, size_class: SizeClass) {
-        let full_brand = "AppImage Hub";
+    pub(crate) fn render_top_bar(
+        &mut self,
+        ui: &mut egui::Ui,
+        size_class: SizeClass,
+        has_sidebar: bool,
+    ) {
         let show_actions_inline = matches!(size_class, SizeClass::Large);
         let tight = matches!(size_class, SizeClass::Tight);
 
         ui.horizontal(|ui| {
-            ui.add(
-                egui::Image::new(egui::include_image!("../../assets/logo.png"))
-                    .fit_to_exact_size(egui::vec2(28.0, 28.0))
-                    .corner_radius(egui::CornerRadius::same(6)),
-            );
-            ui.add_space(6.0);
-            if tight {
-                ui.label(
-                    RichText::new("AIM")
-                        .size(22.0)
-                        .strong()
-                        .color(crate::ui::theme::TEXT_PRIMARY),
-                )
-                .on_hover_text(full_brand);
-            } else {
-                ui.label(
-                    RichText::new(full_brand)
-                        .size(22.0)
-                        .strong()
-                        .color(crate::ui::theme::TEXT_PRIMARY),
+            // When the left sidebar is hidden (Narrow / Tight), show brand + quick nav menu
+            if !has_sidebar {
+                ui.add(
+                    egui::Image::new(egui::include_image!("../../assets/logo.png"))
+                        .fit_to_exact_size(egui::vec2(26.0, 26.0))
+                        .corner_radius(egui::CornerRadius::same(6)),
                 );
                 ui.add_space(4.0);
-                ui.label(
-                    RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
-                        .size(11.0)
-                        .strong()
-                        .color(crate::ui::theme::TEXT_MUTED),
-                );
+                if tight {
+                    ui.label(
+                        RichText::new("Hub")
+                            .size(18.0)
+                            .strong()
+                            .color(theme::text_primary()),
+                    )
+                    .on_hover_text("AppImage Hub");
+                } else {
+                    ui.label(
+                        RichText::new("AppImage Hub")
+                            .size(18.0)
+                            .strong()
+                            .color(theme::text_primary()),
+                    );
+                }
+                ui.add_space(theme::SPACE_SM);
+            }
+
+            // Pill-shaped search box (ytm-rs style) when viewing the library
+            if !self.show_settings {
+                let search_w: f32 = match size_class {
+                    SizeClass::Large => 280.0,
+                    SizeClass::Medium => 220.0,
+                    SizeClass::Narrow => 160.0,
+                    SizeClass::Tight => 108.0,
+                };
+                egui::Frame::new()
+                    .fill(theme::surface_raised())
+                    .stroke(egui::Stroke::new(1.0_f32, theme::border()))
+                    .corner_radius(egui::CornerRadius::same(theme::RADIUS_PILL))
+                    .inner_margin(egui::Margin::symmetric(12, 5))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            let clear_w: f32 = if self.search_query.is_empty() { 0.0 } else { 20.0 };
+                            ui.add_sized(
+                                [(search_w - clear_w - 24.0).max(60.0), 22.0],
+                                egui::TextEdit::singleline(&mut self.search_query)
+                                    .frame(false)
+                                    .hint_text(
+                                        RichText::new("Search apps…").color(theme::text_muted()),
+                                    ),
+                            );
+                            if !self.search_query.is_empty()
+                                && ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("×")
+                                                .size(14.0)
+                                                .color(theme::text_muted()),
+                                        )
+                                        .frame(false),
+                                    )
+                                    .on_hover_text("Clear search")
+                                    .clicked()
+                            {
+                                self.search_query.clear();
+                            }
+                        });
+                    });
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.render_toolbar_actions(ui, show_actions_inline);
+                self.render_toolbar_actions(ui, show_actions_inline, has_sidebar);
             });
         });
+
+        // On Narrow / Tight viewports (no sidebar), show a clean wrapped filter pill strip
+        if !has_sidebar && !self.show_settings {
+            ui.add_space(theme::SPACE_SM);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                let updates_count = self.updates_available_count();
+                for filter in NavFilter::ALL {
+                    let active = self.nav_filter == filter;
+                    let label = if filter == NavFilter::Updates && updates_count > 0 {
+                        format!("Updates ({updates_count})")
+                    } else {
+                        filter.label().to_string()
+                    };
+                    let btn = if active {
+                        theme::primary_button(label).min_size(egui::vec2(64.0, 26.0))
+                    } else {
+                        theme::ghost_button(label).min_size(egui::vec2(64.0, 26.0))
+                    };
+                    if ui.add(btn).clicked() {
+                        self.nav_filter = filter;
+                    }
+                }
+            });
+        }
     }
 
-    /// Single source of truth for the "Update All" label.
     fn update_all_label_text(&self) -> String {
         let updates_count = self.updates_available_count();
         if updates_count > 0 {
@@ -53,7 +124,6 @@ impl ManagerApp {
         }
     }
 
-    /// Single source of truth for the "Check All Updates" label.
     fn check_updates_label_text(&self) -> &'static str {
         if self.update_check.is_some() {
             "Checking updates…"
@@ -62,20 +132,28 @@ impl ManagerApp {
         }
     }
 
-    pub(crate) fn render_toolbar_actions(&mut self, ui: &mut egui::Ui, inline: bool) {
+    pub(crate) fn render_toolbar_actions(
+        &mut self,
+        ui: &mut egui::Ui,
+        inline: bool,
+        has_sidebar: bool,
+    ) {
         if inline {
-            // Primary "Add" action: neon pill with a hover glow.
-            let add = ui.add(crate::ui::theme::add_button("+ Add AppImage"));
-            if add.hovered() {
-                crate::ui::theme::draw_glow(
+            if self.hub_update_url.is_some() || self.hub_update_progress.is_some() {
+                let hub_progress = self.hub_update_progress;
+                let hub_enabled = hub_progress.is_none();
+                let hub_clicked = progress_button(
                     ui,
-                    add.rect,
-                    crate::ui::theme::RADIUS_PILL,
-                    crate::ui::theme::ACCENT,
-                );
-            }
-            if add.clicked() {
-                self.open_add_form();
+                    "Update Hub",
+                    "Updating Hub…",
+                    hub_progress,
+                    hub_enabled,
+                    148.0,
+                )
+                .clicked();
+                if hub_clicked && hub_enabled {
+                    self.start_hub_update();
+                }
             }
 
             let updates_count = self.updates_available_count();
@@ -84,7 +162,7 @@ impl ManagerApp {
             let update_all_clicked = ui
                 .add_enabled(
                     !has_active_downloads && updates_count > 0,
-                    crate::ui::theme::ghost_button(update_all_label),
+                    theme::ghost_button(update_all_label),
                 )
                 .on_disabled_hover_text(if has_active_downloads {
                     "Wait for active downloads to finish"
@@ -105,43 +183,34 @@ impl ManagerApp {
             if check_clicked && !checking {
                 self.check_all_updates();
             }
-
-            if self.hub_update_url.is_some() || self.hub_update_progress.is_some() {
-                let hub_progress = self.hub_update_progress;
-                let hub_enabled = hub_progress.is_none();
-                let hub_clicked = progress_button(
-                    ui,
-                    "Update Hub",
-                    "Updating Hub…",
-                    hub_progress,
-                    hub_enabled,
-                    152.0,
-                )
-                .clicked();
-                if hub_clicked && hub_enabled {
-                    self.start_hub_update();
-                }
-            }
-
-            ui.add_space(4.0);
-            if ui
-                .add(crate::ui::theme::secondary_button("Settings"))
-                .on_hover_text("Storage, updates, and GitHub API settings")
-                .clicked()
-            {
-                self.open_settings();
-            }
         } else {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(crate::ui::theme::add_button("+ Add")).clicked() {
-                    self.open_add_form();
-                }
-                if ui
-                    .add(crate::ui::theme::secondary_button("Settings"))
-                    .on_hover_text("Storage, updates, and GitHub API settings")
-                    .clicked()
-                {
-                    self.open_settings();
+                if !has_sidebar {
+                    if ui
+                        .add(theme::add_button("+ Add").min_size(egui::vec2(68.0, 30.0)))
+                        .clicked()
+                    {
+                        if self.show_settings {
+                            self.close_settings(ui.ctx());
+                        }
+                        self.open_add_form();
+                    }
+                    let settings_btn = if self.show_settings {
+                        theme::primary_button("Settings").min_size(egui::vec2(74.0, 30.0))
+                    } else {
+                        theme::secondary_button("Settings").min_size(egui::vec2(74.0, 30.0))
+                    };
+                    if ui
+                        .add(settings_btn)
+                        .on_hover_text("Themes, storage, updates, and GitHub API")
+                        .clicked()
+                    {
+                        if self.show_settings {
+                            self.close_settings(ui.ctx());
+                        } else {
+                            self.open_settings();
+                        }
+                    }
                 }
                 ui.menu_button("Actions", |ui| {
                     if self.hub_update_url.is_some() {

@@ -1,5 +1,6 @@
 pub mod app_list;
 pub mod breakpoints;
+pub mod colorpick;
 pub mod confirm_dialog;
 pub mod format;
 pub mod settings_panel;

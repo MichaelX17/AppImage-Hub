@@ -1,6 +1,6 @@
 use crate::app::ManagerApp;
 use crate::ui::theme;
-use eframe::egui::{self, RichText, Stroke};
+use eframe::egui::{self, RichText};
 
 pub fn render(ctx: &egui::Context, mgr: &mut ManagerApp) {
     if mgr.pending_delete.is_some() {
@@ -30,37 +30,23 @@ fn render_delete(ctx: &egui::Context, mgr: &mut ManagerApp) {
 
     let mut request_close = false;
     let modal = egui::Modal::new(egui::Id::new("confirm_delete_modal"))
-        // Dark focus layer behind the dialog. egui does not provide a native
-        // gaussian backdrop blur, so the modal uses a strong dimming veil.
-        .backdrop_color(egui::Color32::from_black_alpha(175))
-        .frame(
-            egui::Frame::new()
-                .fill(theme::SURFACE_RAISED)
-                .stroke(Stroke::new(1.5_f32, theme::ACCENT))
-                .corner_radius(egui::CornerRadius::same(theme::RADIUS_LG))
-                .inner_margin(egui::Margin::same(theme::SPACE_LG as i8))
-                .shadow(egui::epaint::Shadow {
-                    offset: [0, 6],
-                    blur: 24,
-                    spread: 1,
-                    color: theme::with_alpha(theme::ACCENT, 80),
-                }),
-        )
+        .backdrop_color(egui::Color32::from_black_alpha(150))
+        .frame(theme::modal_frame())
         .show(ctx, |ui| {
-            ui.set_width(360.0);
+            ui.set_width((ctx.screen_rect().width() - 64.0).clamp(260.0, 380.0));
 
             ui.label(
                 RichText::new("Confirm Delete")
-                    .size(21.0)
+                    .size(20.0)
                     .strong()
-                    .color(theme::TEXT_PRIMARY),
+                    .color(theme::text_primary()),
             );
 
             ui.add_space(theme::SPACE_MD);
             ui.label(
                 RichText::new(format!("Are you sure you want to delete \"{app_name}\"?"))
                     .size(14.0)
-                    .color(theme::TEXT_SECONDARY),
+                    .color(theme::text_secondary()),
             );
             ui.add_space(theme::SPACE_LG);
 
@@ -91,28 +77,16 @@ fn render_storage_change(ctx: &egui::Context, mgr: &mut ManagerApp) {
 
     let mut request_close = false;
     let modal = egui::Modal::new(egui::Id::new("confirm_storage_change_modal"))
-        .backdrop_color(egui::Color32::from_black_alpha(175))
-        .frame(
-            egui::Frame::new()
-                .fill(theme::SURFACE_RAISED)
-                .stroke(Stroke::new(1.5_f32, theme::ACCENT))
-                .corner_radius(egui::CornerRadius::same(theme::RADIUS_LG))
-                .inner_margin(egui::Margin::same(theme::SPACE_LG as i8))
-                .shadow(egui::epaint::Shadow {
-                    offset: [0, 6],
-                    blur: 24,
-                    spread: 1,
-                    color: theme::with_alpha(theme::ACCENT, 80),
-                }),
-        )
+        .backdrop_color(egui::Color32::from_black_alpha(150))
+        .frame(theme::modal_frame())
         .show(ctx, |ui| {
-            ui.set_width(440.0);
+            ui.set_width((ctx.screen_rect().width() - 64.0).clamp(280.0, 440.0));
 
             ui.label(
                 RichText::new("Change AppImage Folder?")
-                    .size(21.0)
+                    .size(20.0)
                     .strong()
-                    .color(theme::TEXT_PRIMARY),
+                    .color(theme::text_primary()),
             );
 
             ui.add_space(theme::SPACE_MD);
@@ -124,13 +98,13 @@ fn render_storage_change(ctx: &egui::Context, mgr: &mut ManagerApp) {
                     new_path.display()
                 ))
                 .size(14.0)
-                .color(theme::TEXT_SECONDARY),
+                .color(theme::text_secondary()),
             );
             ui.add_space(theme::SPACE_LG);
 
             ui.horizontal(|ui| {
                 if ui.add(theme::primary_button("Change Folder")).clicked() {
-                    mgr.confirm_storage_change();
+                    mgr.confirm_storage_change(ctx);
                     request_close = true;
                 }
                 if ui.add(theme::secondary_button("Cancel")).clicked() {

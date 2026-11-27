@@ -117,14 +117,14 @@ pub(crate) fn progress_button(
     }
 
     let fill = if enabled && response.hovered() {
-        crate::ui::theme::SURFACE_HOVER
+        crate::ui::theme::surface_hover()
     } else {
-        crate::ui::theme::NEUTRAL
+        crate::ui::theme::neutral()
     };
     let stroke = if enabled && response.hovered() {
-        crate::ui::theme::ACCENT_HOVER
+        crate::ui::theme::accent_hover()
     } else {
-        crate::ui::theme::with_alpha(crate::ui::theme::BORDER, 180)
+        crate::ui::theme::border()
     };
     let radius = egui::CornerRadius::same(crate::ui::theme::RADIUS_PILL);
 
@@ -146,7 +146,7 @@ pub(crate) fn progress_button(
             ui.painter().with_clip_rect(progress_rect).rect_filled(
                 rect,
                 radius,
-                crate::ui::theme::ACCENT,
+                crate::ui::theme::accent(),
             );
         }
     }
@@ -156,7 +156,7 @@ pub(crate) fn progress_button(
         egui::Align2::CENTER_CENTER,
         text,
         egui::FontId::proportional(13.0),
-        crate::ui::theme::TEXT_PRIMARY,
+        crate::ui::theme::text_primary(),
     );
 
     response

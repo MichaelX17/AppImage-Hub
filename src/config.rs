@@ -95,6 +95,57 @@ pub struct Config {
     /// Create/update AppImage Hub's own Desktop shortcut.
     #[serde(default)]
     pub hub_desktop_shortcut: bool,
+    /// Visual theme (Dark/Light) and custom detail colors.
+    #[serde(default)]
+    pub theme: ThemeSettings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeMode {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl ThemeMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dark => "Dark",
+            Self::Light => "Light",
+        }
+    }
+}
+
+/// Persisted theme mode and detail color personalizations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThemeSettings {
+    pub mode: ThemeMode,
+    /// Primary accent color (`[r, g, b]`) for buttons, toggles, active nav, and progress bars.
+    pub accent_rgb: [u8; 3],
+    /// Optional custom surface tint for cards and panels (`None` = default Dark/Light surface).
+    pub custom_surface_rgb: Option<[u8; 3]>,
+    /// Optional custom border and divider color (`None` = subtle default border).
+    pub custom_border_rgb: Option<[u8; 3]>,
+    /// Optional custom highlight/badge detail color (`None` = follow accent/semantic defaults).
+    pub custom_detail_rgb: Option<[u8; 3]>,
+    /// Card and panel corner roundness in points (6..=18, default 12).
+    pub corner_radius: u8,
+}
+
+impl Default for ThemeSettings {
+    fn default() -> Self {
+        Self {
+            mode: ThemeMode::Dark,
+            // ytm-rs warm crimson accent (#FF3048)
+            accent_rgb: [0xFF, 0x30, 0x48],
+            custom_surface_rgb: None,
+            custom_border_rgb: None,
+            custom_detail_rgb: None,
+            corner_radius: 12,
+        }
+    }
 }
 
 impl Default for Config {
@@ -109,6 +160,7 @@ impl Default for Config {
             hub_start_menu_shortcut: true,
             hub_start_menu_category: default_hub_category(),
             hub_desktop_shortcut: false,
+            theme: ThemeSettings::default(),
         }
     }
 }
@@ -394,6 +446,14 @@ mod tests {
             hub_start_menu_shortcut: false,
             hub_start_menu_category: "Development".into(),
             hub_desktop_shortcut: true,
+            theme: ThemeSettings {
+                mode: ThemeMode::Light,
+                accent_rgb: [0x3B, 0x82, 0xF6],
+                custom_surface_rgb: Some([0xF0, 0xF4, 0xFF]),
+                custom_border_rgb: Some([0xCB, 0xD5, 0xE1]),
+                custom_detail_rgb: Some([0x10, 0xB9, 0x81]),
+                corner_radius: 14,
+            },
         }
     }
 

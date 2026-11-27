@@ -181,6 +181,28 @@ pub enum ChecksumStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NavFilter {
+    #[default]
+    All,
+    Updates,
+    Github,
+    Local,
+}
+
+impl NavFilter {
+    pub const ALL: [Self; 4] = [Self::All, Self::Updates, Self::Github, Self::Local];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All Apps",
+            Self::Updates => "Updates",
+            Self::Github => "GitHub",
+            Self::Local => "Local Only",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AppSortBy {
     #[default]
     Name,
@@ -358,6 +380,8 @@ pub struct ManagerApp {
     pub(crate) show_side_panel: bool,
     pub(crate) show_settings: bool,
     pub(crate) settings_form: crate::ui::settings_panel::SettingsFormState,
+    pub(crate) nav_filter: NavFilter,
+    pub(crate) search_query: String,
     /// True until the user picks where AppImages should be stored.
     first_run_setup: bool,
     /// When the last GitHub update check completed (drives the footer label).
@@ -450,6 +474,7 @@ impl ManagerApp {
                 Some(format!("Your configuration could not be loaded. {error:#}")),
             ),
         };
+        crate::ui::theme::apply_theme(&cc.egui_ctx, &loaded_config.theme);
         let config = Arc::new(Mutex::new(loaded_config));
 
         // Do not act on default settings derived from an unreadable config:
@@ -523,6 +548,8 @@ impl ManagerApp {
             show_side_panel,
             show_settings: false,
             settings_form: crate::ui::settings_panel::SettingsFormState::default(),
+            nav_filter: NavFilter::All,
+            search_query: String::new(),
             first_run_setup,
             last_checked: None,
             auto_check_done: false,
@@ -665,6 +692,6 @@ impl ManagerApp {
     }
 
     pub(crate) fn is_right_panel_open(&self) -> bool {
-        self.is_form_open || self.add_to.is_some() || self.show_settings
+        !self.show_settings && (self.is_form_open || self.add_to.is_some())
     }
 }

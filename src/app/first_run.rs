@@ -37,7 +37,7 @@ impl ManagerApp {
 
     pub(crate) fn render_first_run_setup(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(crate::ui::theme::BG))
+            .frame(egui::Frame::NONE.fill(crate::ui::theme::bg()))
             .show(ctx, |ui| {
                 ui.add_space((ui.available_height() * 0.16).clamp(32.0, 120.0));
                 ui.vertical_centered(|ui| {
@@ -51,7 +51,7 @@ impl ManagerApp {
                         RichText::new("AppImage Hub")
                             .size(28.0)
                             .strong()
-                            .color(crate::ui::theme::TEXT_PRIMARY),
+                            .color(crate::ui::theme::text_primary()),
                     );
                     ui.add_space(crate::ui::theme::SPACE_SM);
                     ui.label(
@@ -69,7 +69,7 @@ impl ManagerApp {
                             egui::Label::new(
                                 RichText::new(warning)
                                     .small()
-                                    .color(crate::ui::theme::WARNING),
+                                    .color(crate::ui::theme::warning()),
                             )
                             .wrap(),
                         );
