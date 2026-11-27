@@ -69,7 +69,7 @@ cargo build --release
 The generated AppImage is written to:
 
 ```text
-dist/AppImage-Hub-0.2.1-x86_64.AppImage
+dist/AppImage-Hub-0.3.0-x86_64.AppImage
 ```
 
 The build script prepares an `AppDir`, installs the desktop entry, icon, AppStream metadata, and custom AppImage Hub metadata, then packages everything with `appimagetool`.

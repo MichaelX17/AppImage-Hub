@@ -74,6 +74,7 @@ pub(crate) fn hub_update_is_available_robust(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn check_updates_button(
     ui: &mut egui::Ui,
     progress: Option<f32>,
@@ -89,6 +90,7 @@ pub(crate) fn check_updates_button(
     )
 }
 
+#[allow(dead_code)]
 pub(crate) fn progress_button(
     ui: &mut egui::Ui,
     idle_label: &str,

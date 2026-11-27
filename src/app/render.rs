@@ -1,27 +1,37 @@
-//! `eframe::App` implementation (windowing, `ytm-rs`-inspired responsive shell, per-frame orchestration).
+//! Spatial shell & per-frame orchestration (`eframe::App`).
+//!
+//! Architecture:
+//! - Left inset sidebar on Large/Medium viewports (brand, instant Dark/Light toggle,
+//!   Command Palette trigger, icon navigation, bottom Settings & telemetry).
+//! - Unified main canvas with subtle top ambient accent lighting, integrated Hero Header,
+//!   and Bento Grid / Linear List view (or full-page Settings screen).
+//! - Floating slide-over drawer for Add/Edit/Shortcuts over a soft dimmed veil.
+//! - Floating Activity Dock, Floating Toasts, Confirm Modals, and `Ctrl+K` Command Palette.
+
 use super::*;
-use crate::ui::theme;
+use crate::ui::icons::{self, Icon};
+use crate::ui::{fonts, theme};
+use eframe::egui::{Color32, CornerRadius, Key, Layout, Margin, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 
 impl eframe::App for ManagerApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        let [r, g, b, _] = theme::bg().to_normalized_gamma_f32();
+        [r, g, b, 1.0]
+    }
+
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("side_panel_width", self.side_panel_width.to_string());
         storage.set_string("show_side_panel", self.show_side_panel.to_string());
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_background_startup();
+
         if self.first_run_setup {
             self.render_first_run_setup(ctx);
             return;
         }
-        // Defer icon repair / sidecar sync past the first painted frame.
-        if self.startup_scan_pending {
-            if self.startup_scan_started {
-                self.startup_scan_pending = false;
-                self.run_startup_scan();
-            } else {
-                self.startup_scan_started = true;
-            }
-        }
+
         let size_class = SizeClass::from_width(ctx.screen_rect().width());
         while let Ok(evt) = self.evt_rx.try_recv() {
             self.apply_event(evt);
@@ -32,26 +42,33 @@ impl eframe::App for ManagerApp {
         self.poll_file_scan();
         self.tick_update_check(ctx);
 
-        if !self.auto_check_done && self.config_warning.is_none() {
+        // Wait until background token load completes before running startup
+        // update checks so authenticated requests and the 1-minute cooldown apply.
+        if self.startup_init_done && !self.auto_check_done && self.config_warning.is_none() {
             self.auto_check_done = true;
             if self.auto_check_enabled() {
                 self.check_all_updates();
             }
         }
-
-        if !self.hub_update_check_started && self.config_warning.is_none() {
+        if self.startup_init_done
+            && !self.hub_update_check_started
+            && self.config_warning.is_none()
+        {
             self.hub_update_check_started = true;
             self.check_hub_update_if_allowed();
         }
 
+        // Global keyboard shortcuts (Ctrl+K palette, Ctrl+N add, Ctrl+, settings)
+        self.handle_global_shortcuts(ctx);
+
         let show_left_sidebar = matches!(size_class, SizeClass::Large | SizeClass::Medium);
 
-        // ── Left Navigation Sidebar (ytm-rs shell) ───────────────────────
+        // ── Left Inset Sidebar ───────────────────────────────────────────
         if show_left_sidebar {
             let sidebar_w = if size_class == SizeClass::Large {
-                216.0
+                232.0
             } else {
-                184.0
+                198.0
             };
             egui::SidePanel::left("nav_sidebar")
                 .resizable(false)
@@ -59,158 +76,58 @@ impl eframe::App for ManagerApp {
                 .frame(
                     egui::Frame::NONE
                         .fill(theme::sidebar_bg())
-                        .stroke(egui::Stroke::new(1.0_f32, theme::border()))
-                        .inner_margin(egui::Margin::symmetric(12, 16)),
+                        .stroke(Stroke::new(1.0_f32, theme::divider_color()))
+                        .inner_margin(Margin::symmetric(14, 18)),
                 )
                 .show(ctx, |ui| {
                     self.render_left_sidebar(ui);
                 });
         }
 
-        // ── Top Bar ──────────────────────────────────────────────────────
-        egui::TopBottomPanel::top("toolbar")
-            .frame(
-                egui::Frame::NONE
-                    .fill(theme::bg())
-                    .inner_margin(egui::Margin {
-                        left: theme::SPACE_LG as i8,
-                        right: theme::SPACE_LG as i8,
-                        top: theme::SPACE_MD as i8,
-                        bottom: theme::SPACE_MD as i8,
-                    })
-                    .stroke(egui::Stroke::new(1.0_f32, theme::divider_color())),
-            )
-            .show(ctx, |ui| {
-                self.render_top_bar(ui, size_class, show_left_sidebar);
-                for (is_config, warning) in [
-                    (true, self.config_warning.clone()),
-                    (false, self.token_warning.clone()),
-                ] {
-                    let Some(warning) = warning else { continue };
-                    ui.add_space(theme::SPACE_XS);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(warning).small().color(theme::warning()));
-                        if ui.small_button("Dismiss").clicked() {
-                            if is_config {
-                                self.config_warning = None;
-                            } else {
-                                self.token_warning = None;
-                            }
-                        }
-                    });
-                }
-                let status_text = self.status.clone();
-                if let Some(status) = status_text {
-                    ui.add_space(theme::SPACE_XS);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(status).small().color(theme::text_secondary()));
-                        if ui.small_button("Dismiss").clicked() {
-                            self.status = None;
-                        }
-                    });
-                }
-            });
-
-        // ── Right Editor Panel (Add / Edit / Shortcuts) ──────────────────
-        let panel_open = self.is_right_panel_open() && self.show_side_panel;
-        let use_side_panel =
-            panel_open && matches!(size_class, SizeClass::Large | SizeClass::Medium);
-
-        if use_side_panel {
-            let total = ctx.screen_rect().width();
-            let total = if total.is_finite() && total > 0.0 {
-                total
-            } else {
-                800.0
-            };
-            let sidebar_w = if size_class == SizeClass::Large {
-                216.0
-            } else {
-                184.0
-            };
-            let remaining = (total - sidebar_w).max(400.0);
-            let desired = (remaining * 0.40).clamp(340.0, 480.0);
-            let max_allowed = (remaining - 360.0).max(320.0);
-            let max_panel = desired.min(max_allowed).max(320.0).clamp(320.0, 480.0);
-            let min_panel = 320.0_f32.min(max_panel);
-            let default_width = self.side_panel_width.clamp(min_panel, max_panel);
-            let panel = egui::SidePanel::right("editor_panel")
-                .resizable(true)
-                .default_width(default_width)
-                .width_range(min_panel..=max_panel)
-                .frame(
-                    egui::Frame::NONE
-                        .fill(theme::bg())
-                        .inner_margin(egui::Margin {
-                            left: 0,
-                            right: theme::SPACE_MD as i8,
-                            top: theme::SPACE_MD as i8,
-                            bottom: theme::SPACE_MD as i8,
-                        }),
-                )
-                .show(ctx, |ui| {
-                    if self.add_to.is_some() {
-                        crate::ui::side_panel::render_add_to(ui, self, size_class);
-                    } else if self.is_form_open {
-                        crate::ui::side_panel::render(ui, self, size_class);
-                    }
-                });
-            let actual = panel.response.rect.width();
-            if actual.is_finite() && actual >= min_panel {
-                self.side_panel_width = actual.clamp(min_panel, 480.0);
-            }
-        }
-
-        // ── Bottom Status / Download Progress Bar ────────────────────────
-        crate::ui::update_state::render(ctx, self, size_class);
-
-        // ── Central Content Area ─────────────────────────────────────────
+        // ── Unified Main Canvas ──────────────────────────────────────────
+        let pad = if matches!(size_class, SizeClass::Tight) {
+            14
+        } else {
+            24
+        };
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::NONE
                     .fill(theme::bg())
-                    .inner_margin(egui::Margin::same(theme::SPACE_LG as i8)),
+                    .inner_margin(Margin::same(pad)),
             )
             .show(ctx, |ui| {
+                // Subtle ambient accent glow across the top of the canvas
+                let full_rect = ui.max_rect().expand(pad as f32);
+                theme::paint_canvas_ambient(ui, full_rect);
+
                 if self.show_settings {
                     crate::ui::settings_panel::render(ui, self, size_class);
-                } else if panel_open && !use_side_panel {
-                    egui::ScrollArea::vertical()
-                        .id_salt("overlay_panel_scroll")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            let max_w = ui.available_width().min(640.0);
-                            ui.set_max_width(max_w);
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .add(theme::secondary_button("← Back to list"))
-                                    .clicked()
-                                {
-                                    self.show_side_panel = false;
-                                }
-                            });
-                            ui.add_space(theme::SPACE_SM);
-                            if self.add_to.is_some() {
-                                crate::ui::side_panel::render_add_to(ui, self, size_class);
-                            } else if self.is_form_open {
-                                crate::ui::side_panel::render(ui, self, size_class);
-                            }
-                        });
                 } else {
+                    self.render_canvas_header(ui, size_class, show_left_sidebar);
+                    ui.add_space(theme::SPACE_LG);
                     let apps = Arc::clone(&self.snapshot.apps);
                     let meta = Arc::clone(&self.snapshot.meta);
                     crate::ui::app_list::render(ui, &apps, &meta, self, size_class);
                 }
             });
 
+        // ── Floating Slide-Over Inspector Drawer (Add / Edit / Shortcuts) ─
+        let drawer_open = self.is_right_panel_open() && self.show_side_panel;
+        if drawer_open {
+            self.render_floating_drawer(ctx, size_class);
+        }
+
+        // ── Floating Activity Dock, Toasts, Modals & Command Palette ─────
+        crate::ui::update_state::render(ctx, self, size_class);
         crate::ui::confirm_dialog::render(ctx, self);
+        crate::ui::palette::render(ctx, self);
 
         let activity_items = self.ops.len() + self.failed_ops.len();
         if activity_items != self.activity_footer_items {
             self.activity_footer_items = activity_items;
             ctx.request_repaint();
         }
-
         if !self.ops.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
@@ -222,55 +139,130 @@ impl eframe::App for ManagerApp {
 }
 
 impl ManagerApp {
+    fn handle_global_shortcuts(&mut self, ctx: &egui::Context) {
+        let (cmd_k, cmd_n, cmd_comma) = ctx.input(|i| {
+            let m = i.modifiers.command;
+            (
+                m && i.key_pressed(Key::K),
+                m && i.key_pressed(Key::N),
+                m && i.key_pressed(Key::Comma),
+            )
+        });
+
+        if cmd_k {
+            self.palette.toggle();
+        } else if cmd_n && !self.palette.open {
+            if self.show_settings {
+                self.close_settings(ctx);
+            }
+            self.open_add_form();
+        } else if cmd_comma && !self.palette.open {
+            if self.show_settings {
+                self.close_settings(ctx);
+            } else {
+                self.open_settings(ctx);
+            }
+        }
+    }
+
     fn render_left_sidebar(&mut self, ui: &mut egui::Ui) {
-        // Brand header
+        // Brand row + instant Dark/Light switcher
         ui.horizontal(|ui| {
             ui.add(
                 egui::Image::new(egui::include_image!("../../assets/logo.png"))
-                    .fit_to_exact_size(egui::vec2(28.0, 28.0))
-                    .corner_radius(egui::CornerRadius::same(7)),
+                    .fit_to_exact_size(vec2(28.0, 28.0))
+                    .corner_radius(CornerRadius::same(8)),
             );
             ui.add_space(6.0);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.label(
                     RichText::new("AppImage Hub")
-                        .size(16.0)
-                        .strong()
+                        .font(fonts::bold(14.5))
                         .color(theme::text_primary()),
                 );
                 ui.label(
-                    theme::muted_label(concat!("v", env!("CARGO_PKG_VERSION"))).size(10.5),
+                    RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
+                        .font(fonts::mono(10.0))
+                        .color(theme::text_muted()),
                 );
+            });
+            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                let (icon, tip) = if theme::is_light() {
+                    (Icon::Moon, "Switch to Dark theme")
+                } else {
+                    (Icon::Sun, "Switch to Light theme")
+                };
+                if theme::icon_button(ui, icon, 28.0, false, tip).clicked() {
+                    self.toggle_theme_mode(ui.ctx());
+                }
             });
         });
 
-        ui.add_space(theme::SPACE_LG);
+        ui.add_space(16.0);
 
-        // Primary CTA pill
-        let add_btn = ui.add_sized(
-            [ui.available_width(), 36.0],
-            theme::add_button("+ Add AppImage"),
+        // Raycast-style Command Palette trigger pill
+        let p = theme::current();
+        let (cmd_rect, cmd_resp) =
+            ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
+        let cmd_resp = cmd_resp
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Open Command Palette (Ctrl+K)");
+        let hover = ui.ctx().animate_bool_responsive(cmd_resp.id, cmd_resp.hovered());
+        let fill = theme::lerp_color(p.surface, p.surface_hover, hover * 0.7);
+        let stroke = theme::lerp_color(p.border, p.border_hover, hover);
+        let cr = CornerRadius::same(p.radius_md.max(8));
+        ui.painter().rect_filled(cmd_rect, cr, fill);
+        ui.painter()
+            .rect_stroke(cmd_rect, cr, Stroke::new(1.0_f32, stroke), StrokeKind::Inside);
+        icons::paint(
+            ui.painter(),
+            Icon::Search,
+            pos2(cmd_rect.left() + 14.0, cmd_rect.center().y),
+            13.5,
+            p.text_muted,
         );
-        if add_btn.hovered() {
-            theme::draw_glow(ui, add_btn.rect, theme::RADIUS_PILL, theme::accent());
-        }
-        if add_btn.clicked() {
-            if self.show_settings {
-                self.close_settings(ui.ctx());
-            }
-            self.open_add_form();
+        ui.painter().text(
+            pos2(cmd_rect.left() + 28.0, cmd_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            "Quick Launch…",
+            fonts::regular(12.0),
+            p.text_muted,
+        );
+        // Subtle ⌘K / ^K badge on right
+        let k_rect = Rect::from_center_size(
+            pos2(cmd_rect.right() - 22.0, cmd_rect.center().y),
+            vec2(32.0, 18.0),
+        );
+        ui.painter()
+            .rect_filled(k_rect, CornerRadius::same(5), p.neutral_soft);
+        ui.painter().text(
+            k_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Ctrl K",
+            fonts::mono(9.0),
+            p.text_muted,
+        );
+        if cmd_resp.clicked() {
+            self.palette.toggle();
         }
 
-        ui.add_space(theme::SPACE_LG);
+        ui.add_space(20.0);
         ui.label(theme::section_heading("Library"));
-        ui.add_space(theme::SPACE_XS);
+        ui.add_space(6.0);
 
+        let total_apps = self.app_count();
         let updates_count = self.updates_available_count();
-        for filter in NavFilter::ALL {
+        let nav_specs = [
+            (NavFilter::All, Icon::AppsGrid, Some((total_apps, false))),
+            (NavFilter::Updates, Icon::Updates, Some((updates_count, true))),
+            (NavFilter::Github, Icon::GitBranch, None),
+            (NavFilter::Local, Icon::HardDrive, None),
+        ];
+
+        for (filter, icon, badge) in nav_specs {
             let active = !self.show_settings && self.nav_filter == filter;
-            let badge = (filter == NavFilter::Updates).then_some(updates_count);
-            if theme::nav_item_button(ui, filter.label(), badge, active).clicked() {
+            if theme::nav_item(ui, icon, filter.label(), badge, active).clicked() {
                 if self.show_settings {
                     self.close_settings(ui.ctx());
                 }
@@ -279,17 +271,72 @@ impl ManagerApp {
             ui.add_space(2.0);
         }
 
-        // Bottom-anchored Settings item
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            if theme::nav_item_button(ui, "Settings", None, self.show_settings).clicked() {
+        // Bottom-anchored Settings + subtle telemetry
+        ui.with_layout(Layout::bottom_up(egui::Align::Min), |ui| {
+            let checked_text = match self.last_checked {
+                Some(when) => format!("Checked {}", crate::ui::format::format_relative_time(when)),
+                None => "Not checked yet".to_string(),
+            };
+            ui.label(
+                RichText::new(checked_text)
+                    .font(fonts::regular(11.0))
+                    .color(theme::text_muted()),
+            );
+            ui.add_space(6.0);
+            if theme::nav_item(ui, Icon::Settings, "Settings", None, self.show_settings).clicked() {
                 if self.show_settings {
                     self.close_settings(ui.ctx());
                 } else {
-                    self.open_settings();
+                    self.open_settings(ui.ctx());
                 }
             }
-            ui.add_space(theme::SPACE_XS);
+            ui.add_space(6.0);
             theme::divider(ui);
         });
+    }
+
+    fn render_floating_drawer(&mut self, ctx: &egui::Context, size_class: SizeClass) {
+        let screen = ctx.screen_rect();
+        let compact = matches!(size_class, SizeClass::Narrow | SizeClass::Tight);
+
+        // Soft dimmed backdrop (click outside to dismiss)
+        let backdrop = egui::Area::new(egui::Id::new("drawer_backdrop"))
+            .order(egui::Order::Middle)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                let (rect, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
+                let alpha = if theme::is_light() { 65 } else { 125 };
+                ui.painter()
+                    .rect_filled(rect, 0.0, Color32::from_black_alpha(alpha));
+                resp
+            });
+        if backdrop.inner.clicked() {
+            self.is_form_open = false;
+            self.add_to = None;
+            self.show_side_panel = false;
+            return;
+        }
+
+        let margin = if compact { 12.0 } else { 18.0 };
+        let drawer_w = if compact {
+            (screen.width() - margin * 2.0).max(280.0)
+        } else {
+            (screen.width() * 0.42).clamp(400.0, 500.0)
+        };
+        let drawer_h = (screen.height() - margin * 2.0).max(300.0);
+        let pos = pos2(screen.right() - drawer_w - margin, screen.top() + margin);
+
+        egui::Area::new(egui::Id::new("floating_inspector_drawer"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                ui.set_min_size(vec2(drawer_w, drawer_h));
+                ui.set_max_size(vec2(drawer_w, drawer_h));
+                if self.add_to.is_some() {
+                    crate::ui::side_panel::render_add_to(ui, self, size_class);
+                } else if self.is_form_open {
+                    crate::ui::side_panel::render(ui, self, size_class);
+                }
+            });
     }
 }

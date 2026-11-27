@@ -1,17 +1,21 @@
-//! Full-page responsive Settings screen styled after `ytm-rs`.
+//! Full-page modern Settings screen ("Obsidian / Alabaster Studio").
 //!
-//! Layout:
-//! - Large / Medium viewports: Left category rail + right scrollable grouped cards.
-//! - Narrow / Tight viewports: Horizontal wrapped category pills + full-width cards.
-//!
-//! Theme changes apply live as the user edits them; clicking Cancel reverts to
-//! the saved theme in `Config`.
+//! - Large / Medium viewports: Left icon-navigation category rail + right grouped cards.
+//! - Narrow / Tight viewports: Wrapped horizontal category pills + full-width cards.
+//! - Includes Curated Quick-Theme Presets, Dark/Light base cards, Custom Detail Color
+//!   Pickers (Accent, Surface Tint, Border/Divider, Badge/Highlight), Corner Roundness,
+//!   and a live Bento Card preview.
 
 use crate::app::ManagerApp;
 use crate::config::{ThemeMode, ThemeSettings};
 use crate::ui::breakpoints::SizeClass;
-use crate::ui::{colorpick, theme};
-use eframe::egui::{self, Align, Color32, CornerRadius, Margin, RichText, Sense, Stroke, pos2, vec2};
+use crate::ui::icons::{self, Icon};
+use crate::ui::theme::{self, ButtonTone};
+use crate::ui::{colorpick, fonts};
+use eframe::egui::{
+    self, Align, Align2, Color32, CornerRadius, Margin, RichText, Sense, Stroke, StrokeKind, pos2,
+    vec2,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsTab {
@@ -42,6 +46,17 @@ impl SettingsTab {
             Self::Shortcuts => "Shortcuts",
             Self::Github => "GitHub API",
             Self::About => "About",
+        }
+    }
+
+    pub fn icon(self) -> Icon {
+        match self {
+            Self::Appearance => Icon::Palette,
+            Self::Storage => Icon::Folder,
+            Self::Updates => Icon::Refresh,
+            Self::Shortcuts => Icon::Link,
+            Self::Github => Icon::Key,
+            Self::About => Icon::Info,
         }
     }
 }
@@ -75,7 +90,6 @@ impl Default for SettingsFormState {
     }
 }
 
-/// Renders the full-screen responsive Settings view inside the central area.
 pub fn render(ui: &mut egui::Ui, mgr: &mut ManagerApp, size_class: SizeClass) {
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         mgr.close_settings(ui.ctx());
@@ -84,10 +98,9 @@ pub fn render(ui: &mut egui::Ui, mgr: &mut ManagerApp, size_class: SizeClass) {
 
     let compact = matches!(size_class, SizeClass::Narrow | SizeClass::Tight);
 
-    // ── Header row ────────────────────────────────────────────────────────
+    // ── Header ───────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
-        if ui
-            .add(theme::secondary_button("← Back"))
+        if theme::pill_action(ui, Some(Icon::ChevronLeft), "Back", ButtonTone::Secondary, 32.0)
             .on_hover_text("Return to AppImages (Esc)")
             .clicked()
         {
@@ -97,15 +110,14 @@ pub fn render(ui: &mut egui::Ui, mgr: &mut ManagerApp, size_class: SizeClass) {
         ui.add_space(theme::SPACE_SM);
         ui.label(
             RichText::new("Settings")
-                .size(26.0)
-                .strong()
+                .font(fonts::bold(24.0))
                 .color(theme::text_primary()),
         );
         if !compact {
             ui.add_space(theme::SPACE_SM);
             ui.label(
-                theme::secondary_label("Customize theme, detail colors, storage, and updates")
-                    .size(13.0),
+                theme::secondary_label("Theme, detail colors, storage, and preferences")
+                    .font(fonts::regular(13.0)),
             );
         }
     });
@@ -114,31 +126,28 @@ pub fn render(ui: &mut egui::Ui, mgr: &mut ManagerApp, size_class: SizeClass) {
     theme::divider(ui);
     ui.add_space(theme::SPACE_MD);
 
-    // Reserve space for the bottom Save / Cancel action bar.
     let footer_h = 56.0;
     let body_h = (ui.available_height() - footer_h).max(140.0);
-
     let mut theme_changed = false;
 
     if compact {
-        // Horizontal category pills on Narrow / Tight widths
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
             for tab in SettingsTab::ALL {
                 let active = mgr.settings_form.active_tab == tab;
-                let btn = if active {
-                    theme::primary_button(tab.label()).min_size(vec2(72.0, 30.0))
+                let tone = if active {
+                    ButtonTone::SubtleAccent
                 } else {
-                    theme::ghost_button(tab.label()).min_size(vec2(72.0, 30.0))
+                    ButtonTone::Ghost
                 };
-                if ui.add(btn).clicked() {
+                if theme::pill_action(ui, Some(tab.icon()), tab.label(), tone, 30.0).clicked() {
                     mgr.settings_form.active_tab = tab;
                 }
             }
         });
         ui.add_space(theme::SPACE_MD);
 
-        let scroll_h = (body_h - 46.0).max(100.0);
+        let scroll_h = (body_h - 48.0).max(100.0);
         egui::ScrollArea::vertical()
             .id_salt("settings_content_compact")
             .auto_shrink([false, false])
@@ -148,19 +157,18 @@ pub fn render(ui: &mut egui::Ui, mgr: &mut ManagerApp, size_class: SizeClass) {
                 ui.add_space(theme::SPACE_LG);
             });
     } else {
-        // Two-column ytm-rs Settings layout: Left category list + right content cards
         ui.allocate_ui_with_layout(
             vec2(ui.available_width(), body_h),
             egui::Layout::left_to_right(Align::Min),
             |ui| {
-                let nav_w = 196.0;
+                let nav_w = 192.0;
                 ui.vertical(|ui| {
                     ui.set_width(nav_w);
                     ui.label(theme::section_heading("Categories"));
-                    ui.add_space(theme::SPACE_SM);
+                    ui.add_space(6.0);
                     for tab in SettingsTab::ALL {
                         let active = mgr.settings_form.active_tab == tab;
-                        if theme::nav_item_button(ui, tab.label(), None, active).clicked() {
+                        if theme::nav_item(ui, tab.icon(), tab.label(), None, active).clicked() {
                             mgr.settings_form.active_tab = tab;
                         }
                         ui.add_space(2.0);
@@ -169,7 +177,7 @@ pub fn render(ui: &mut egui::Ui, mgr: &mut ManagerApp, size_class: SizeClass) {
 
                 ui.add_space(theme::SPACE_XL);
 
-                let content_w = ui.available_width().clamp(260.0, 740.0);
+                let content_w = ui.available_width().clamp(260.0, 760.0);
                 ui.vertical(|ui| {
                     ui.set_width(content_w);
                     egui::ScrollArea::vertical()
@@ -189,21 +197,17 @@ pub fn render(ui: &mut egui::Ui, mgr: &mut ManagerApp, size_class: SizeClass) {
         theme::apply_theme(ui.ctx(), &mgr.settings_form.theme);
     }
 
-    // ── Bottom sticky action bar ──────────────────────────────────────────
+    // ── Bottom Action Bar ────────────────────────────────────────────────
     theme::divider(ui);
     ui.add_space(theme::SPACE_SM);
     ui.horizontal(|ui| {
-        if ui
-            .add_sized([148.0, 38.0], theme::primary_button("Save Settings"))
+        if theme::pill_action(ui, Some(Icon::Check), "Save Settings", ButtonTone::Primary, 36.0)
             .clicked()
         {
             mgr.save_settings(ui.ctx());
         }
         ui.add_space(theme::SPACE_SM);
-        if ui
-            .add_sized([96.0, 38.0], theme::ghost_button("Cancel"))
-            .clicked()
-        {
+        if theme::pill_action(ui, None, "Cancel", ButtonTone::Ghost, 36.0).clicked() {
             mgr.close_settings(ui.ctx());
         }
     });
@@ -238,10 +242,10 @@ fn render_tab_content(ui: &mut egui::Ui, mgr: &mut ManagerApp) -> bool {
 fn render_appearance_tab(ui: &mut egui::Ui, mgr: &mut ManagerApp) -> bool {
     let mut changed = false;
 
+    // ── Section 1: Base Mode (Dark / Light) ──────────────────────────────
     ui.label(theme::section_heading("Base Theme"));
     ui.add_space(theme::SPACE_SM);
 
-    // Visual Dark / Light mode selector cards
     theme::settings_card(ui, |ui| {
         let avail = ui.available_width();
         let stack = avail < 380.0;
@@ -285,19 +289,52 @@ fn render_appearance_tab(ui: &mut egui::Ui, mgr: &mut ManagerApp) -> bool {
         }
     });
 
+    // ── Section 2: Curated Studio Presets ────────────────────────────────
+    ui.add_space(theme::SPACE_LG);
+    ui.label(theme::section_heading("Curated Looks"));
+    ui.add_space(theme::SPACE_SM);
+
+    theme::settings_card(ui, |ui| {
+        let presets = theme::curated_presets();
+        let gap = 8.0;
+        let avail = ui.available_width();
+        let cols = if avail >= 520.0 {
+            3
+        } else if avail >= 320.0 {
+            2
+        } else {
+            1
+        };
+        let pill_w = ((avail - gap * (cols as f32 - 1.0)) / cols as f32).max(130.0);
+
+        for chunk in presets.chunks(cols) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for preset in chunk {
+                    let is_active = mgr.settings_form.theme == preset.settings;
+                    if preset_tile(ui, preset, is_active, pill_w) {
+                        mgr.settings_form.theme = preset.settings.clone();
+                        changed = true;
+                    }
+                }
+            });
+            ui.add_space(gap);
+        }
+    });
+
+    // ── Section 3: Granular Detail Personalization ───────────────────────
     ui.add_space(theme::SPACE_LG);
     ui.label(theme::section_heading("Detail Personalization"));
     ui.add_space(theme::SPACE_SM);
 
     theme::settings_card(ui, |ui| {
-        // Accent Color row (swatches + custom HSV picker)
         theme::setting_row(
             ui,
             "Accent color",
-            Some("Used for primary buttons, toggles, active navigation, and progress bars."),
+            Some("Primary buttons, active navigation indicators, toggles, and progress bars."),
             |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
                     if colorpick::swatch_button(
                         ui,
                         "accent_custom_picker",
@@ -306,16 +343,16 @@ fn render_appearance_tab(ui: &mut egui::Ui, mgr: &mut ManagerApp) -> bool {
                         changed = true;
                     }
                     ui.label(
-                        theme::secondary_label(colorpick::to_hex(colorpick::rgb_to_color(
+                        RichText::new(colorpick::to_hex(colorpick::rgb_to_color(
                             mgr.settings_form.theme.accent_rgb,
                         )))
-                        .size(12.0),
+                        .font(fonts::mono(12.0))
+                        .color(theme::text_secondary()),
                     );
                 });
             },
         );
 
-        // Curated accent preset dots
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
             for &(name, rgb) in theme::ACCENT_PRESETS {
@@ -336,7 +373,7 @@ fn render_appearance_tab(ui: &mut egui::Ui, mgr: &mut ManagerApp) -> bool {
                     ui.painter().circle_stroke(
                         rect.center(),
                         12.0,
-                        Stroke::new(1.5_f32, theme::with_alpha(theme::text_primary(), 140)),
+                        Stroke::new(1.5_f32, theme::with_alpha(theme::text_primary(), 135)),
                     );
                 }
                 if resp.clicked() {
@@ -348,11 +385,10 @@ fn render_appearance_tab(ui: &mut egui::Ui, mgr: &mut ManagerApp) -> bool {
         ui.add_space(theme::SPACE_SM);
         theme::divider(ui);
 
-        // Card / Surface Tint detail
         theme::setting_row(
             ui,
             "Card & surface tint",
-            Some("Subtly tint app cards and panels while keeping Dark or Light readability."),
+            Some("Subtly tint Bento cards and panels while preserving Dark or Light contrast."),
             |ui| {
                 if colorpick::optional_detail_picker(
                     ui,
@@ -366,11 +402,10 @@ fn render_appearance_tab(ui: &mut egui::Ui, mgr: &mut ManagerApp) -> bool {
         );
         theme::divider(ui);
 
-        // Border & Divider Detail Color
         theme::setting_row(
             ui,
-            "Border & divider color",
-            Some("Customize outlines around cards, inputs, and menus."),
+            "Border & hairline color",
+            Some("Customize outlines around Bento cards, inputs, and floating menus."),
             |ui| {
                 if colorpick::optional_detail_picker(
                     ui,
@@ -384,11 +419,10 @@ fn render_appearance_tab(ui: &mut egui::Ui, mgr: &mut ManagerApp) -> bool {
         );
         theme::divider(ui);
 
-        // Highlight / Badge Detail Color
         theme::setting_row(
             ui,
             "Badge & highlight detail",
-            Some("Color for update badges, version tags, and fallback app initials."),
+            Some("Color for update tags, version arrows, and fallback app initials."),
             |ui| {
                 if colorpick::optional_detail_picker(
                     ui,
@@ -402,22 +436,21 @@ fn render_appearance_tab(ui: &mut egui::Ui, mgr: &mut ManagerApp) -> bool {
         );
         theme::divider(ui);
 
-        // Corner Roundness
         theme::setting_row(
             ui,
             "Corner roundness",
-            Some("Adjust the curvature of cards, panels, and inputs."),
+            Some("Adjust curvature of cards, modals, and inputs."),
             |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    for (label, r) in [("Sharp", 6_u8), ("Balanced", 12_u8), ("Soft", 16_u8)] {
+                    for (label, r) in [("Sharp", 8_u8), ("Balanced", 14_u8), ("Soft", 18_u8)] {
                         let active = mgr.settings_form.theme.corner_radius == r;
-                        let btn = if active {
-                            theme::primary_button(label).min_size(vec2(68.0, 28.0))
+                        let tone = if active {
+                            ButtonTone::Primary
                         } else {
-                            theme::ghost_button(label).min_size(vec2(68.0, 28.0))
+                            ButtonTone::Secondary
                         };
-                        if ui.add(btn).clicked() {
+                        if theme::pill_action(ui, None, label, tone, 28.0).clicked() {
                             mgr.settings_form.theme.corner_radius = r;
                             changed = true;
                         }
@@ -427,13 +460,14 @@ fn render_appearance_tab(ui: &mut egui::Ui, mgr: &mut ManagerApp) -> bool {
         );
         theme::divider(ui);
 
-        // Reset button row
         theme::setting_row(
             ui,
             "Reset appearance",
-            Some("Restore the default ytm-rs colors and corner roundness for the active mode."),
+            Some("Restore clean default detail colors for the selected Dark or Light mode."),
             |ui| {
-                if ui.add(theme::secondary_button("Reset Defaults")).clicked() {
+                if theme::pill_action(ui, Some(Icon::Refresh), "Reset Defaults", ButtonTone::Secondary, 30.0)
+                    .clicked()
+                {
                     let keep_mode = mgr.settings_form.theme.mode;
                     mgr.settings_form.theme = ThemeSettings {
                         mode: keep_mode,
@@ -445,102 +479,177 @@ fn render_appearance_tab(ui: &mut egui::Ui, mgr: &mut ManagerApp) -> bool {
         );
     });
 
+    // ── Section 4: Live Preview Bento Card ───────────────────────────────
     ui.add_space(theme::SPACE_LG);
     ui.label(theme::section_heading("Live Preview"));
     ui.add_space(theme::SPACE_SM);
 
-    // Mini preview card showing how current theme + details look together
-    theme::card_frame().show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal_wrapped(|ui| {
-            let (icon_r, _) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::hover());
-            let cr = CornerRadius::same(theme::radius_md());
-            ui.painter()
-                .rect_filled(icon_r, cr, theme::surface_raised());
-            ui.painter()
-                .rect_stroke(icon_r, cr, Stroke::new(1.0_f32, theme::border()), egui::StrokeKind::Inside);
-            ui.painter().text(
-                icon_r.center(),
-                egui::Align2::CENTER_CENTER,
-                "A",
-                egui::FontId::proportional(20.0),
-                theme::detail(),
-            );
-            ui.add_space(8.0);
-            ui.vertical(|ui| {
-                ui.label(
-                    RichText::new("Sample AppImage")
-                        .size(15.0)
-                        .strong()
-                        .color(theme::text_primary()),
-                );
-                ui.label(theme::muted_label("owner/sample-app • v1.4.2").size(12.0));
-            });
-            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                theme::badge_sized(
-                    ui,
-                    "Update available",
-                    theme::BadgeKind::Accent,
-                    vec2(114.0, 24.0),
-                );
-                ui.add_space(6.0);
-                let _ = ui.add(theme::primary_button("Launch"));
-            });
+    let (preview_rect, _) =
+        ui.allocate_exact_size(vec2(ui.available_width(), 82.0), Sense::hover());
+    theme::paint_bento_card(ui.painter(), preview_rect, 0.25, true);
+    let inner = preview_rect.shrink2(vec2(16.0, 14.0));
+    let mut pui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::left_to_right(Align::Center)),
+    );
+    let (icon_r, _) = pui.allocate_exact_size(vec2(46.0, 46.0), Sense::hover());
+    let cr = CornerRadius::same(11);
+    pui.painter()
+        .rect_filled(icon_r, cr, theme::surface_raised());
+    pui.painter().rect_stroke(
+        icon_r,
+        cr,
+        Stroke::new(1.0_f32, theme::border()),
+        StrokeKind::Inside,
+    );
+    pui.painter().text(
+        icon_r.center(),
+        Align2::CENTER_CENTER,
+        "A",
+        fonts::bold(20.0),
+        theme::detail(),
+    );
+    pui.add_space(10.0);
+    pui.vertical(|ui| {
+        ui.label(
+            RichText::new("Sample AppImage")
+                .font(fonts::bold(15.0))
+                .color(theme::text_primary()),
+        );
+        ui.horizontal(|ui| {
+            theme::version_pill(ui, "v1.4 → v1.5", theme::detail(), theme::detail_soft());
+            theme::status_pill(ui, "Update ready", theme::BadgeKind::Accent);
         });
+    });
+    pui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+        let _ = theme::pill_action(ui, Some(Icon::Play), "Launch", ButtonTone::Primary, 32.0);
     });
 
     changed
 }
 
+fn preset_tile(
+    ui: &mut egui::Ui,
+    preset: &theme::ThemePreset,
+    selected: bool,
+    width: f32,
+) -> bool {
+    let height = 56.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let hover = ui.ctx().animate_bool_responsive(resp.id, resp.hovered());
+
+    let p = theme::current();
+    let cr = CornerRadius::same(p.radius_md.max(8));
+    let fill = if selected {
+        p.accent_soft
+    } else {
+        theme::lerp_color(p.surface_raised, p.surface_hover, hover)
+    };
+    let stroke = if selected {
+        Stroke::new(1.5_f32, p.accent)
+    } else {
+        Stroke::new(1.0_f32, theme::lerp_color(p.border, p.border_hover, hover))
+    };
+
+    ui.painter().rect_filled(rect, cr, fill);
+    ui.painter()
+        .rect_stroke(rect, cr, stroke, StrokeKind::Inside);
+
+    // Mini dual color dot (base bg + accent)
+    let bg_dot = if preset.settings.mode == ThemeMode::Dark {
+        Color32::from_rgb(0x12, 0x12, 0x18)
+    } else {
+        Color32::from_rgb(0xF5, 0xF5, 0xF8)
+    };
+    let acc_dot = colorpick::rgb_to_color(preset.settings.accent_rgb);
+    ui.painter()
+        .circle_filled(pos2(rect.left() + 18.0, rect.center().y), 9.0, bg_dot);
+    ui.painter().circle_stroke(
+        pos2(rect.left() + 18.0, rect.center().y),
+        9.0,
+        Stroke::new(1.0_f32, p.border_hover),
+    );
+    ui.painter()
+        .circle_filled(pos2(rect.left() + 26.0, rect.center().y), 7.5, acc_dot);
+
+    ui.painter().text(
+        pos2(rect.left() + 42.0, rect.center().y - 7.0),
+        Align2::LEFT_CENTER,
+        preset.name,
+        fonts::medium(12.5),
+        p.text_primary,
+    );
+    ui.painter().text(
+        pos2(rect.left() + 42.0, rect.center().y + 8.0),
+        Align2::LEFT_CENTER,
+        preset.subtitle,
+        fonts::regular(10.5),
+        p.text_muted,
+    );
+
+    resp.clicked()
+}
+
 fn theme_mode_card(ui: &mut egui::Ui, mode: ThemeMode, selected: bool, width: f32) -> bool {
-    let height = 96.0;
+    let height = 98.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     let r = CornerRadius::same(theme::radius_lg());
 
-    let (preview_bg, preview_side, preview_card, preview_text) = match mode {
+    let (preview_bg, preview_side, preview_card, preview_text, icon) = match mode {
         ThemeMode::Dark => (
-            Color32::from_rgb(0x0C, 0x0A, 0x0E),
-            Color32::from_rgb(0x16, 0x13, 0x1B),
-            Color32::from_rgb(0x22, 0x1E, 0x28),
-            Color32::from_rgb(0xF2, 0xF0, 0xF5),
+            Color32::from_rgb(0x0A, 0x0A, 0x0E),
+            Color32::from_rgb(0x11, 0x11, 0x18),
+            Color32::from_rgb(0x18, 0x18, 0x22),
+            Color32::from_rgb(0xF4, 0xF4, 0xF8),
+            Icon::Moon,
         ),
         ThemeMode::Light => (
-            Color32::from_rgb(0xF6, 0xF4, 0xF8),
-            Color32::from_rgb(0xEB, 0xE7, 0xF0),
+            Color32::from_rgb(0xF5, 0xF5, 0xF7),
+            Color32::from_rgb(0xEC, 0xEC, 0xF1),
             Color32::from_rgb(0xFF, 0xFF, 0xFF),
-            Color32::from_rgb(0x16, 0x14, 0x1A),
+            Color32::from_rgb(0x11, 0x11, 0x18),
+            Icon::Sun,
         ),
     };
 
     let p = ui.painter();
     p.rect_filled(rect, r, preview_bg);
 
-    // Mini sidebar strip
-    let side = egui::Rect::from_min_size(rect.min + vec2(8.0, 8.0), vec2(32.0, height - 16.0));
-    p.rect_filled(side, CornerRadius::same(6), preview_side);
-    // Mini accent pill inside sidebar
-    let pill = egui::Rect::from_min_size(side.min + vec2(5.0, 10.0), vec2(22.0, 6.0));
+    let side = egui::Rect::from_min_size(rect.min + vec2(8.0, 8.0), vec2(34.0, height - 16.0));
+    p.rect_filled(side, CornerRadius::same(7), preview_side);
+    let pill = egui::Rect::from_min_size(side.min + vec2(6.0, 12.0), vec2(22.0, 6.0));
     p.rect_filled(pill, CornerRadius::same(3), theme::accent());
 
-    // Mini cards on right
-    let c1 = egui::Rect::from_min_max(
-        pos2(side.right() + 8.0, rect.top() + 10.0),
-        pos2(rect.right() - 10.0, rect.top() + 36.0),
+    // Mini 2-column Bento cards inside preview
+    let grid_left = side.right() + 8.0;
+    let half_w = ((rect.right() - 10.0 - grid_left) - 6.0) / 2.0;
+    let c1 = egui::Rect::from_min_size(pos2(grid_left, rect.top() + 10.0), vec2(half_w, 44.0));
+    let c2 = egui::Rect::from_min_size(
+        pos2(c1.right() + 6.0, rect.top() + 10.0),
+        vec2(half_w, 44.0),
     );
-    p.rect_filled(c1, CornerRadius::same(6), preview_card);
-    let c2 = egui::Rect::from_min_max(
-        pos2(side.right() + 8.0, c1.bottom() + 6.0),
-        pos2(rect.right() - 10.0, rect.bottom() - 28.0),
-    );
-    p.rect_filled(c2, CornerRadius::same(6), preview_card);
+    p.rect_filled(c1, CornerRadius::same(7), preview_card);
+    p.rect_filled(c2, CornerRadius::same(7), preview_card);
 
-    // Mode title bottom-right
+    icons::paint(
+        p,
+        icon,
+        pos2(grid_left + 8.0, rect.bottom() - 16.0),
+        14.0,
+        if selected {
+            theme::accent()
+        } else {
+            preview_text
+        },
+    );
     p.text(
-        pos2(side.right() + 10.0, rect.bottom() - 14.0),
-        egui::Align2::LEFT_CENTER,
+        pos2(grid_left + 22.0, rect.bottom() - 16.0),
+        Align2::LEFT_CENTER,
         mode.label(),
-        egui::FontId::proportional(13.5),
+        fonts::bold(13.5),
         preview_text,
     );
 
@@ -551,7 +660,7 @@ fn theme_mode_card(ui: &mut egui::Ui, mode: ThemeMode, selected: bool, width: f3
     } else {
         Stroke::new(1.0_f32, theme::border())
     };
-    p.rect_stroke(rect, r, stroke, egui::StrokeKind::Inside);
+    p.rect_stroke(rect, r, stroke, StrokeKind::Inside);
 
     resp.clicked()
 }
@@ -561,21 +670,21 @@ fn render_storage_tab(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
     ui.add_space(theme::SPACE_SM);
     theme::settings_card(ui, |ui| {
         ui.label(theme::field_label("AppImage root folder"));
-        ui.add_space(theme::SPACE_XS);
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
-            let browse_w = 96.0;
+            let browse_w = 104.0;
             let spacing = ui.spacing().item_spacing.x;
             let input_w = (ui.available_width() - browse_w - spacing).max(120.0);
             ui.add_sized(
-                [input_w, 40.0],
+                [input_w, 38.0],
                 egui::TextEdit::singleline(&mut mgr.settings_form.apps_dir)
+                    .font(fonts::mono(12.5))
                     .hint_text("Folder where AppImages are stored")
                     .margin(Margin::symmetric(12, 9))
                     .vertical_align(Align::Center)
                     .desired_width(input_w),
             );
-            if ui
-                .add_sized([browse_w, 40.0], theme::secondary_button("Browse"))
+            if theme::pill_action(ui, Some(Icon::Folder), "Browse", ButtonTone::Secondary, 38.0)
                 .clicked()
             {
                 if let Some(path) = rfd::FileDialog::new()
@@ -586,12 +695,10 @@ fn render_storage_tab(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
                 }
             }
         });
-        ui.add_space(theme::SPACE_XS);
+        ui.add_space(6.0);
         ui.label(
-            theme::muted_label(
-                "New AppImages are stored in per-app folders inside this directory.",
-            )
-            .size(12.0),
+            theme::muted_label("New AppImages are organized into per-app subfolders here.")
+                .font(fonts::regular(12.0)),
         );
     });
 }
@@ -603,19 +710,19 @@ fn render_updates_tab(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
         theme::setting_row(
             ui,
             "Auto-check on startup",
-            Some("Automatically check GitHub releases for managed apps when AppImage Hub starts."),
+            Some("Check GitHub releases automatically whenever AppImage Hub launches."),
             |ui| {
                 theme::toggle(ui, &mut mgr.settings_form.auto_check_updates);
             },
         );
         theme::divider(ui);
-        let cooldown_text = if mgr.update_check_cooldown() <= 2 * 60 {
-            "Rate-limited to once every 2 minutes (GitHub token configured)."
+        let cooldown_text = if mgr.update_check_cooldown() <= 60 {
+            "Rate-limited to once every 1 minute (GitHub token configured)."
         } else {
-            "Rate-limited to once every 5 minutes. Add a GitHub token to shorten it to 2 minutes."
+            "Rate-limited to once every 5 minutes. Add a GitHub token to shorten it to 1 minute."
         };
         ui.add_space(theme::SPACE_SM);
-        ui.label(theme::muted_label(cooldown_text).size(12.0));
+        ui.label(theme::muted_label(cooldown_text).font(fonts::regular(12.0)));
         ui.add_space(theme::SPACE_XS);
     });
 }
@@ -627,7 +734,7 @@ fn render_shortcuts_tab(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
         theme::setting_row(
             ui,
             "Start Menu shortcut",
-            Some("Create and keep AppImage Hub's own application menu entry up to date."),
+            Some("Create and maintain AppImage Hub's own application launcher entry."),
             |ui| {
                 theme::toggle(ui, &mut mgr.settings_form.hub_start_menu_shortcut);
             },
@@ -679,10 +786,11 @@ fn render_github_tab(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
     ui.add_space(theme::SPACE_SM);
     theme::settings_card(ui, |ui| {
         ui.label(theme::field_label("Personal access token (optional)"));
-        ui.add_space(theme::SPACE_XS);
+        ui.add_space(6.0);
         ui.add_sized(
-            [ui.available_width(), 40.0],
+            [ui.available_width(), 38.0],
             egui::TextEdit::singleline(&mut mgr.settings_form.github_token)
+                .font(fonts::mono(12.5))
                 .hint_text("ghp_…")
                 .password(!mgr.settings_form.show_token)
                 .margin(Margin::symmetric(12, 9))
@@ -706,7 +814,7 @@ fn render_github_tab(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
                      Argon2id in a 0600 file under your config folder. Never written to \
                      config.toml or beside a portable AppImage.",
                 )
-                .size(12.0),
+                .font(fonts::regular(12.0)),
             )
             .wrap(),
         );
@@ -722,22 +830,23 @@ fn render_about_tab(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
             ui.add(
                 egui::Image::new(egui::include_image!("../../assets/logo.png"))
                     .fit_to_exact_size(vec2(52.0, 52.0))
-                    .corner_radius(CornerRadius::same(12)),
+                    .corner_radius(CornerRadius::same(13)),
             );
             ui.add_space(theme::SPACE_MD);
             ui.vertical(|ui| {
                 ui.label(
                     RichText::new("AppImage Hub")
-                        .size(20.0)
-                        .strong()
+                        .font(fonts::bold(20.0))
                         .color(theme::text_primary()),
                 );
                 ui.label(
-                    theme::secondary_label(concat!("Version ", env!("CARGO_PKG_VERSION")))
-                        .size(13.0),
+                    RichText::new(concat!("Version ", env!("CARGO_PKG_VERSION")))
+                        .font(fonts::mono(12.0))
+                        .color(theme::text_secondary()),
                 );
                 ui.label(
-                    theme::muted_label("Native desktop manager for Linux AppImages.").size(12.0),
+                    theme::muted_label("Modern desktop manager for Linux AppImages.")
+                        .font(fonts::regular(12.0)),
                 );
             });
         });
@@ -749,11 +858,11 @@ fn render_about_tab(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
             "Managed apps",
             Some("Total AppImages currently tracked in your library."),
             |ui| {
-                ui.label(
-                    RichText::new(mgr.app_count().to_string())
-                        .size(14.0)
-                        .strong()
-                        .color(theme::text_primary()),
+                theme::version_pill(
+                    ui,
+                    &mgr.app_count().to_string(),
+                    theme::text_primary(),
+                    theme::current().neutral_soft,
                 );
             },
         );
@@ -765,8 +874,9 @@ fn render_about_tab(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
             |ui| {
                 ui.add(
                     egui::Label::new(
-                        theme::muted_label(crate::config::Config::config_path().display().to_string())
-                            .size(12.0),
+                        RichText::new(crate::config::Config::config_path().display().to_string())
+                            .font(fonts::mono(11.0))
+                            .color(theme::text_muted()),
                     )
                     .truncate(),
                 );

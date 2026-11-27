@@ -480,7 +480,7 @@ impl ManagerApp {
         }
     }
 
-    pub(crate) fn open_settings(&mut self) {
+    pub(crate) fn open_settings(&mut self, ctx: &egui::Context) {
         let (apps_dir, auto_check_updates, hub_start_menu, hub_category, hub_desktop, theme) = self
             .config
             .lock()
@@ -508,10 +508,24 @@ impl ManagerApp {
                     crate::config::ThemeSettings::default(),
                 )
             });
-        let github_token = crate::secrets::load_github_token()
-            .or_else(|| std::env::var("GITHUB_TOKEN").ok())
-            .or_else(|| std::env::var("GH_TOKEN").ok())
-            .unwrap_or_default();
+
+        // Load stored GitHub token off the UI thread so clicking Settings never
+        // stalls on Secret Service (D-Bus) or Argon2id decryption.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let wake_ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("settings-token".into())
+            .spawn(move || {
+                let token = crate::secrets::load_github_token()
+                    .or_else(|| std::env::var("GITHUB_TOKEN").ok())
+                    .or_else(|| std::env::var("GH_TOKEN").ok())
+                    .unwrap_or_default();
+                let _ = tx.send(token);
+                wake_ctx.request_repaint();
+            })
+            .ok();
+        self.settings_token_rx = Some(rx);
+
         let active_tab = self.settings_form.active_tab;
         self.settings_form = crate::ui::settings_panel::SettingsFormState {
             active_tab,
@@ -521,7 +535,7 @@ impl ManagerApp {
             hub_start_menu_shortcut: hub_start_menu,
             hub_start_menu_category: hub_category,
             hub_desktop_shortcut: hub_desktop,
-            github_token,
+            github_token: String::new(),
             show_token: false,
         };
         self.is_form_open = false;
@@ -592,29 +606,34 @@ impl ManagerApp {
             return;
         }
         crate::ui::theme::apply_theme(ctx, &theme);
-        desktop_entry::sync_hub_shortcuts(hub_menu, hub_desktop, &hub_category);
+
+        // Run desktop shortcut sync in the background so saving settings stays instant.
+        std::thread::Builder::new()
+            .name("sync-shortcuts".into())
+            .spawn(move || {
+                desktop_entry::sync_hub_shortcuts(hub_menu, hub_desktop, &hub_category);
+            })
+            .ok();
 
         let token = zeroize::Zeroizing::new(self.settings_form.github_token.trim().to_string());
-        if let Err(e) = crate::secrets::save_github_token(&token) {
-            self.status = Some(format!("failed to save GitHub token: {e:#}"));
-            return;
+        // Only write the token if the async token fetch already completed (or user typed a token)
+        // so clicking Save quickly never accidentally wipes an unloaded token.
+        let token_loaded = self.settings_token_rx.is_none() || !token.is_empty();
+        if token_loaded {
+            if let Err(e) = crate::secrets::save_github_token(&token) {
+                self.status = Some(format!("failed to save GitHub token: {e:#}"));
+                return;
+            }
+            self.has_github_token = token_is_present(Some(&token));
+            self.send_cmd(BackendCommand::SetGithubToken(if token.is_empty() {
+                None
+            } else {
+                Some(token.to_string())
+            }));
         }
-        self.has_github_token = token_is_present(Some(&token));
-        self.send_cmd(BackendCommand::SetGithubToken(if token.is_empty() {
-            None
-        } else {
-            Some(token.to_string())
-        }));
-        let report = self.sync_metadata_files();
         self.close_settings(ctx);
-        let mut message = format!("Settings saved. AppImages folder: {}", path.display());
-        if report.adopted > 0 {
-            message.push_str(&format!(". Found {} existing app(s)", report.adopted));
-        }
-        if let Some(note) = report.note() {
-            message.push_str(&format!(". {note}"));
-        }
-        self.status = Some(message);
+        self.status = Some(format!("Settings saved. AppImages folder: {}", path.display()));
+        self.start_background_storage_scan(ctx, false);
     }
 
     pub(crate) fn apply_add_to(&mut self) {
@@ -1047,314 +1066,321 @@ impl ManagerApp {
         }
     }
 
-    pub(crate) fn repair_missing_icons(&mut self) {
+    pub(crate) fn app_storage_dir(&self) -> PathBuf {
+        app_storage_dir_in(&self.config)
+    }
+}
+
+pub(crate) fn app_storage_dir_in(config: &Arc<Mutex<Config>>) -> PathBuf {
+    config
+        .lock()
+        .ok()
+        .and_then(|cfg| cfg.custom_download_dir.clone())
+        .unwrap_or_else(xdg::default_managed_apps_dir)
+}
+
+pub(crate) fn repair_missing_icons_in(config: &Arc<Mutex<Config>>) {
+    let candidates: Vec<AppEntry> = config
+        .lock()
+        .map(|cfg| {
+            cfg.applications
+                .iter()
+                .filter(|app| {
+                    let has_valid = app.icon_path.as_ref().is_some_and(|p| p.exists());
+                    !has_valid && app.local_path.exists()
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    // Perform slow disk/extraction work without holding the Config mutex!
+    let mut resolved: Vec<(String, PathBuf)> = Vec::new();
+    for app in candidates {
+        if let Some(folder) = app.local_path.parent() {
+            let direct_png = folder.join("icon.png");
+            let direct_svg = folder.join("icon.svg");
+            if direct_png.exists() {
+                resolved.push((app.id, direct_png));
+            } else if direct_svg.exists() {
+                resolved.push((app.id, direct_svg));
+            } else if let Ok(extracted) = crate::appimage::extract_icon_with_policy(
+                &app.local_path,
+                folder,
+                crate::appimage::ExtractionPolicy::NeverExecute,
+            ) {
+                resolved.push((app.id, extracted));
+            }
+        }
+    }
+
+    if resolved.is_empty() {
+        return;
+    }
+
+    let mut apps_to_rewrite: Vec<AppEntry> = Vec::new();
+    if let Ok(mut cfg) = config.lock() {
         let mut modified = false;
-        let mut apps_to_rewrite: Vec<AppEntry> = Vec::new();
-
-        if let Ok(mut cfg) = self.config.lock() {
-            for app in &mut cfg.applications {
-                let has_valid_icon = app.icon_path.as_ref().map(|p| p.exists()).unwrap_or(false);
-
-                if !has_valid_icon && app.local_path.exists() {
-                    if let Some(folder) = app.local_path.parent() {
-                        let direct_png = folder.join("icon.png");
-                        let direct_svg = folder.join("icon.svg");
-                        if direct_png.exists() {
-                            app.icon_path = Some(direct_png);
-                            modified = true;
-                            apps_to_rewrite.push(app.clone());
-                        } else if direct_svg.exists() {
-                            app.icon_path = Some(direct_svg);
-                            modified = true;
-                            apps_to_rewrite.push(app.clone());
-                        } else if let Ok(extracted) = crate::appimage::extract_icon_with_policy(
-                            &app.local_path,
-                            folder,
-                            crate::appimage::ExtractionPolicy::NeverExecute,
-                        ) {
-                            app.icon_path = Some(extracted);
-                            modified = true;
-                            apps_to_rewrite.push(app.clone());
-                        }
-                    }
-                }
-            }
-            if modified {
-                let _ = cfg.save();
+        for (id, icon_path) in resolved {
+            if let Some(app) = cfg.applications.iter_mut().find(|a| a.id == id) {
+                app.icon_path = Some(icon_path);
+                modified = true;
+                apps_to_rewrite.push(app.clone());
             }
         }
-
-        for app in apps_to_rewrite {
-            refresh_existing_shortcuts(&app);
-        }
-    }
-
-    /// Backfills `StartupWMClass` for entries that have no value or predate the
-    /// `startup_wm_class_auto` flag. The window class is read from the
-    /// AppImage's embedded `.desktop` file via non-executing extraction.
-    pub(crate) fn repair_startup_wm_classes(&mut self) {
-        let candidates: Vec<AppEntry> = self
-            .config
-            .lock()
-            .map(|cfg| {
-                cfg.applications
-                    .iter()
-                    .filter(|app| {
-                        app.local_path.exists()
-                            && (app.startup_wm_class.is_none()
-                                || app.startup_wm_class_auto.is_none())
-                    })
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        if candidates.is_empty() {
-            return;
-        }
-
-        let mut repaired: Vec<(AppEntry, bool)> = Vec::with_capacity(candidates.len());
-        for mut app in candidates {
-            let (mut detected, sidecar_protected) =
-                match appmeta::read_for_appimage_result(&app.local_path) {
-                    Ok(Some(meta)) => (
-                        meta.startup_wm_class
-                            .and_then(|value| crate::appimage::normalize_startup_wm_class(&value)),
-                        false,
-                    ),
-                    Ok(None) => (None, false),
-                    Err(appmeta::SidecarError::UnsupportedSchema { .. }) => (None, true),
-                    Err(_) => (None, false),
-                };
-            // A legacy sidecar may contain the old display-name fallback
-            // instead of the real window class. Do not trust it: re-read the
-            // AppImage's embedded desktop entry.
-            let display_fallback = xdg::sanitize_name(&app.display_name);
-            if detected.as_deref() == Some(display_fallback.as_str()) {
-                detected = None;
-            }
-            if detected.is_none() {
-                if let Ok(meta) = crate::appimage::extract_metadata_with_policy(
-                    &app.local_path,
-                    None,
-                    crate::appimage::ExtractionPolicy::NeverExecute,
-                ) {
-                    detected = meta.startup_wm_class;
-                }
-            }
-            if detected.is_some() {
-                app.startup_wm_class = detected;
-            }
-            app.startup_wm_class_auto = Some(true);
-            repaired.push((app, sidecar_protected));
-        }
-
-        let saved = self
-            .config
-            .lock()
-            .map(|mut cfg| {
-                for (app, _) in &repaired {
-                    if let Some(stored) = cfg.applications.iter_mut().find(|a| a.id == app.id) {
-                        stored.startup_wm_class = app.startup_wm_class.clone();
-                        stored.startup_wm_class_auto = app.startup_wm_class_auto;
-                    }
-                }
-                cfg.save()
-            })
-            .unwrap_or_else(|_| Err(anyhow::anyhow!("configuration lock is poisoned")));
-        if let Err(error) = saved {
-            self.status = Some(format!("Could not save window-class metadata: {error:#}"));
-            return;
-        }
-
-        for (app, sidecar_protected) in &repaired {
-            refresh_existing_shortcuts(app);
-            if !sidecar_protected {
-                let _ = appmeta::write_for_entry(app);
-            }
-        }
-    }
-
-    /// Renames already-managed binaries to the clean `<name>.appimage` form,
-    /// so entries added before this naming scheme also end up clean.
-    /// Idempotent: skips missing files and existing target names.
-    pub(crate) fn normalize_managed_filenames(&mut self) {
-        let mut moves: Vec<(String, PathBuf, PathBuf)> = Vec::new();
-        if let Ok(cfg) = self.config.lock() {
-            let roots = crate::storage::roots(&cfg);
-            for app in &cfg.applications {
-                if !app.local_path.exists() {
-                    continue;
-                }
-                if !crate::storage::is_in_storage_root(&app.local_path, &roots) {
-                    continue;
-                }
-                if let Some(target) = clean_managed_path(&app.local_path, &app.display_name) {
-                    if !target.exists() {
-                        moves.push((app.id.clone(), app.local_path.clone(), target));
-                    }
-                }
-            }
-        }
-
-        let mut moved: Vec<(String, PathBuf)> = Vec::new();
-        for (id, old, new) in moves {
-            if std::fs::rename(&old, &new).is_err() {
-                continue;
-            }
-            // Drop the sidecar that belonged to the previous file name.
-            let _ = std::fs::remove_file(appmeta::sidecar_path(&old));
-            moved.push((id, new));
-        }
-        if moved.is_empty() {
-            return;
-        }
-
-        let mut rewritten: Vec<AppEntry> = Vec::new();
-        if let Ok(mut cfg) = self.config.lock() {
-            for (id, new_path) in &moved {
-                if let Some(entry) = cfg.applications.iter_mut().find(|a| &a.id == id) {
-                    entry.local_path = new_path.clone();
-                    entry.file_fingerprint = crate::config::file_fingerprint(new_path);
-                    rewritten.push(entry.clone());
-                }
-            }
+        if modified {
             let _ = cfg.save();
         }
-        for entry in &rewritten {
-            refresh_existing_shortcuts(entry);
-            let _ = appmeta::write_for_entry(entry);
-        }
     }
 
-    pub(crate) fn app_storage_dir(&self) -> PathBuf {
-        self.config
-            .lock()
-            .ok()
-            .and_then(|cfg| cfg.custom_download_dir.clone())
-            .unwrap_or_else(xdg::default_managed_apps_dir)
+    for app in apps_to_rewrite {
+        refresh_existing_shortcuts(&app);
+    }
+}
+
+pub(crate) fn repair_startup_wm_classes_in(config: &Arc<Mutex<Config>>) -> Option<String> {
+    let candidates: Vec<AppEntry> = config
+        .lock()
+        .map(|cfg| {
+            cfg.applications
+                .iter()
+                .filter(|app| {
+                    app.local_path.exists()
+                        && (app.startup_wm_class.is_none() || app.startup_wm_class_auto.is_none())
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    if candidates.is_empty() {
+        return None;
     }
 
-    /// Keeps `<name>.json` sidecars in sync with the config, and scans the
-    /// selected storage folder for existing AppImages that are missing from
-    /// `config.toml` (for example after choosing a folder with previous apps).
-    ///
-    /// Invalid sidecars are quarantined and reported. Sidecars written by a
-    /// newer AppImage Hub are never overwritten.
-    pub(crate) fn sync_metadata_files(&mut self) -> MetadataSyncReport {
-        let mut report = MetadataSyncReport::default();
-        let mut known_ids: HashSet<String> = HashSet::new();
-        let mut known_paths: HashSet<PathBuf> = HashSet::new();
-        let mut missing: Vec<AppEntry> = Vec::new();
-        // Paths whose sidecar must not be rewritten (newer schema).
-        let mut protected: HashSet<PathBuf> = HashSet::new();
-
-        if let Ok(cfg) = self.config.lock() {
-            for app in &cfg.applications {
-                known_ids.insert(app.id.clone());
-                known_paths.insert(app.local_path.clone());
-                if !app.local_path.exists() {
-                    continue;
-                }
-                match appmeta::read_for_appimage_result(&app.local_path) {
-                    Ok(Some(_)) => {}
-                    Ok(None) => missing.push(app.clone()),
-                    Err(error) => {
-                        if matches!(error, appmeta::SidecarError::UnsupportedSchema { .. }) {
-                            report.skipped_newer += 1;
-                            protected.insert(app.local_path.clone());
-                        } else {
-                            // Invalid JSON is already quarantined by the read.
-                            report.repaired += 1;
-                            missing.push(app.clone());
-                        }
-                        report.warnings.push(error.to_string());
-                    }
-                }
-            }
-        }
-        for app in missing {
-            if protected.contains(&app.local_path) {
-                continue;
-            }
-            if let Err(error) = appmeta::write_for_entry(&app) {
-                report.warnings.push(format!(
-                    "Could not restore metadata for {}: {error:#}",
-                    app.display_name
-                ));
-            }
-        }
-
-        let base = self.app_storage_dir();
-        let mut appimages = Vec::new();
-        collect_appimages(&base, &mut appimages, 0);
-
-        let mut adopted: Vec<AppEntry> = Vec::new();
-        for appimage in crate::storage::unknown_candidates(appimages, &known_paths) {
-            let discovered = match appmeta::read_for_appimage_result(&appimage) {
-                Ok(meta) => meta,
-                Err(error) => {
-                    if matches!(error, appmeta::SidecarError::UnsupportedSchema { .. }) {
-                        report.skipped_newer += 1;
-                        protected.insert(appimage.clone());
-                    } else {
-                        report.repaired += 1;
-                    }
-                    report.warnings.push(error.to_string());
-                    None
-                }
+    let mut repaired: Vec<(AppEntry, bool)> = Vec::with_capacity(candidates.len());
+    for mut app in candidates {
+        let (mut detected, sidecar_protected) =
+            match appmeta::read_for_appimage_result(&app.local_path) {
+                Ok(Some(meta)) => (
+                    meta.startup_wm_class
+                        .and_then(|value| crate::appimage::normalize_startup_wm_class(&value)),
+                    false,
+                ),
+                Ok(None) => (None, false),
+                Err(appmeta::SidecarError::UnsupportedSchema { .. }) => (None, true),
+                Err(_) => (None, false),
             };
-            let mut entry = match discovered {
-                Some(meta) => meta.to_entry(appimage.clone()),
-                None => app_entry_from_appimage(&appimage),
-            };
-            // Never trust a sidecar's fingerprint for a file we are adopting
-            // now: baseline whatever is actually on disk.
-            entry.file_fingerprint = crate::config::file_fingerprint(&appimage);
-            if known_ids.contains(&entry.id) {
-                continue;
+        let display_fallback = xdg::sanitize_name(&app.display_name);
+        if detected.as_deref() == Some(display_fallback.as_str()) {
+            detected = None;
+        }
+        if detected.is_none() {
+            if let Ok(meta) = crate::appimage::extract_metadata_with_policy(
+                &app.local_path,
+                None,
+                crate::appimage::ExtractionPolicy::NeverExecute,
+            ) {
+                detected = meta.startup_wm_class;
             }
-            known_ids.insert(entry.id.clone());
-            known_paths.insert(appimage);
-            adopted.push(entry);
         }
+        if detected.is_some() {
+            app.startup_wm_class = detected;
+        }
+        app.startup_wm_class_auto = Some(true);
+        repaired.push((app, sidecar_protected));
+    }
 
-        if adopted.is_empty() {
-            return report;
-        }
-        let saved = if let Ok(mut cfg) = self.config.lock() {
-            cfg.applications.extend(adopted.iter().cloned());
+    let saved = config
+        .lock()
+        .map(|mut cfg| {
+            for (app, _) in &repaired {
+                if let Some(stored) = cfg.applications.iter_mut().find(|a| a.id == app.id) {
+                    stored.startup_wm_class = app.startup_wm_class.clone();
+                    stored.startup_wm_class_auto = app.startup_wm_class_auto;
+                }
+            }
             cfg.save()
-        } else {
-            Err(anyhow::anyhow!("configuration lock is poisoned"))
-        };
-        if let Err(error) = saved {
-            // Roll the in-memory list back so it matches the file on disk.
-            if let Ok(mut cfg) = self.config.lock() {
-                let keep = cfg.applications.len().saturating_sub(adopted.len());
-                cfg.applications.truncate(keep);
-            }
-            report
-                .warnings
-                .push(format!("Could not save adopted apps: {error:#}"));
-            return report;
+        })
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("configuration lock is poisoned")));
+    if let Err(error) = saved {
+        return Some(format!("Could not save window-class metadata: {error:#}"));
+    }
+
+    for (app, sidecar_protected) in &repaired {
+        refresh_existing_shortcuts(app);
+        if !sidecar_protected {
+            let _ = appmeta::write_for_entry(app);
         }
-        for entry in &adopted {
-            // Scanning a folder must not create shortcuts by itself. Only
-            // update entries the user has already chosen to create.
-            refresh_existing_shortcuts(entry);
-            if protected.contains(&entry.local_path) {
+    }
+    None
+}
+
+pub(crate) fn normalize_managed_filenames_in(config: &Arc<Mutex<Config>>) {
+    let mut moves: Vec<(String, PathBuf, PathBuf)> = Vec::new();
+    if let Ok(cfg) = config.lock() {
+        let roots = crate::storage::roots(&cfg);
+        for app in &cfg.applications {
+            if !app.local_path.exists() {
                 continue;
             }
-            if let Err(error) = appmeta::write_for_entry(entry) {
-                report.warnings.push(format!(
-                    "Could not write metadata for {}: {error:#}",
-                    entry.display_name
-                ));
+            if !crate::storage::is_in_storage_root(&app.local_path, &roots) {
+                continue;
+            }
+            if let Some(target) = clean_managed_path(&app.local_path, &app.display_name) {
+                if !target.exists() {
+                    moves.push((app.id.clone(), app.local_path.clone(), target));
+                }
             }
         }
-        report.adopted = adopted.len();
-        report
     }
+
+    let mut moved: Vec<(String, PathBuf)> = Vec::new();
+    for (id, old, new) in moves {
+        if std::fs::rename(&old, &new).is_err() {
+            continue;
+        }
+        let _ = std::fs::remove_file(appmeta::sidecar_path(&old));
+        moved.push((id, new));
+    }
+    if moved.is_empty() {
+        return;
+    }
+
+    let mut rewritten: Vec<AppEntry> = Vec::new();
+    if let Ok(mut cfg) = config.lock() {
+        for (id, new_path) in &moved {
+            if let Some(entry) = cfg.applications.iter_mut().find(|a| &a.id == id) {
+                entry.local_path = new_path.clone();
+                entry.file_fingerprint = crate::config::file_fingerprint(new_path);
+                rewritten.push(entry.clone());
+            }
+        }
+        let _ = cfg.save();
+    }
+    for entry in &rewritten {
+        refresh_existing_shortcuts(entry);
+        let _ = appmeta::write_for_entry(entry);
+    }
+}
+
+pub(crate) fn sync_metadata_files_in(config: &Arc<Mutex<Config>>) -> MetadataSyncReport {
+    let mut report = MetadataSyncReport::default();
+    let mut known_ids: HashSet<String> = HashSet::new();
+    let mut known_paths: HashSet<PathBuf> = HashSet::new();
+    let mut missing: Vec<AppEntry> = Vec::new();
+    let mut protected: HashSet<PathBuf> = HashSet::new();
+
+    // Clone entries quickly so we never hold the Config mutex during disk I/O
+    let snapshot_apps: Vec<AppEntry> = config
+        .lock()
+        .map(|cfg| cfg.applications.clone())
+        .unwrap_or_default();
+
+    for app in &snapshot_apps {
+        known_ids.insert(app.id.clone());
+        known_paths.insert(app.local_path.clone());
+        if !app.local_path.exists() {
+            continue;
+        }
+        match appmeta::read_for_appimage_result(&app.local_path) {
+            Ok(Some(_)) => {}
+            Ok(None) => missing.push(app.clone()),
+            Err(error) => {
+                if matches!(error, appmeta::SidecarError::UnsupportedSchema { .. }) {
+                    report.skipped_newer += 1;
+                    protected.insert(app.local_path.clone());
+                } else {
+                    report.repaired += 1;
+                    missing.push(app.clone());
+                }
+                report.warnings.push(error.to_string());
+            }
+        }
+    }
+
+    for app in missing {
+        if protected.contains(&app.local_path) {
+            continue;
+        }
+        if let Err(error) = appmeta::write_for_entry(&app) {
+            report.warnings.push(format!(
+                "Could not restore metadata for {}: {error:#}",
+                app.display_name
+            ));
+        }
+    }
+
+    let base = app_storage_dir_in(config);
+    let mut appimages = Vec::new();
+    collect_appimages(&base, &mut appimages, 0);
+
+    let mut adopted: Vec<AppEntry> = Vec::new();
+    for appimage in crate::storage::unknown_candidates(appimages, &known_paths) {
+        let discovered = match appmeta::read_for_appimage_result(&appimage) {
+            Ok(meta) => meta,
+            Err(error) => {
+                if matches!(error, appmeta::SidecarError::UnsupportedSchema { .. }) {
+                    report.skipped_newer += 1;
+                    protected.insert(appimage.clone());
+                } else {
+                    report.repaired += 1;
+                }
+                report.warnings.push(error.to_string());
+                None
+            }
+        };
+        let mut entry = match discovered {
+            Some(meta) => meta.to_entry(appimage.clone()),
+            None => app_entry_from_appimage(&appimage),
+        };
+        entry.file_fingerprint = crate::config::file_fingerprint(&appimage);
+        if known_ids.contains(&entry.id) {
+            continue;
+        }
+        known_ids.insert(entry.id.clone());
+        known_paths.insert(appimage);
+        adopted.push(entry);
+    }
+
+    if adopted.is_empty() {
+        return report;
+    }
+    let saved = if let Ok(mut cfg) = config.lock() {
+        cfg.applications.extend(adopted.iter().cloned());
+        cfg.save()
+    } else {
+        Err(anyhow::anyhow!("configuration lock is poisoned"))
+    };
+    if let Err(error) = saved {
+        if let Ok(mut cfg) = config.lock() {
+            let keep = cfg.applications.len().saturating_sub(adopted.len());
+            cfg.applications.truncate(keep);
+        }
+        report
+            .warnings
+            .push(format!("Could not save adopted apps: {error:#}"));
+        return report;
+    }
+    for entry in &adopted {
+        refresh_existing_shortcuts(entry);
+        if protected.contains(&entry.local_path) {
+            continue;
+        }
+        if let Err(error) = appmeta::write_for_entry(entry) {
+            report.warnings.push(format!(
+                "Could not write metadata for {}: {error:#}",
+                entry.display_name
+            ));
+        }
+    }
+    report.adopted = adopted.len();
+    report
+}
+
+impl ManagerApp {
 
     pub(crate) fn updates_available_count(&self) -> usize {
         self.update_available.len()

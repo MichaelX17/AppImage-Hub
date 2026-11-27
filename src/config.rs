@@ -77,7 +77,7 @@ pub struct Config {
     #[serde(default = "default_auto_check_updates")]
     pub auto_check_updates: bool,
     /// Unix timestamp of the last app update check, used for the rate-limit
-    /// cooldown (5 minutes anonymously, 2 minutes with a GitHub token).
+    /// cooldown (5 minutes anonymously, 1 minute with a GitHub token).
     #[serde(default)]
     pub last_update_check: Option<i64>,
     /// Unix timestamp of the last AppImage Hub self-update check.
@@ -138,12 +138,12 @@ impl Default for ThemeSettings {
     fn default() -> Self {
         Self {
             mode: ThemeMode::Dark,
-            // ytm-rs warm crimson accent (#FF3048)
-            accent_rgb: [0xFF, 0x30, 0x48],
+            // Modern studio indigo accent (#6366F1)
+            accent_rgb: [0x63, 0x66, 0xF1],
             custom_surface_rgb: None,
             custom_border_rgb: None,
             custom_detail_rgb: None,
-            corner_radius: 12,
+            corner_radius: 14,
         }
     }
 }

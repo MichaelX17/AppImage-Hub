@@ -1,99 +1,79 @@
-//! Top bar (ytm-rs-inspired pill search + responsive action bar).
+//! Modern integrated Canvas Hero Header (replaces the old chunky top toolbar).
+//!
+//! Combines page title, inline search pill, Grid/List switcher, Sort popover,
+//! animated Sync button, and primary `+ Add App` CTA — collapsing gracefully
+//! on Narrow and Tight viewports.
+
 use super::*;
-use crate::ui::theme;
+use crate::ui::icons::{self, Icon};
+use crate::ui::theme::{self, ButtonTone};
+use crate::ui::fonts;
+use eframe::egui::{Align, CornerRadius, Layout, Margin, RichText, Stroke, vec2};
 
 impl ManagerApp {
-    pub(crate) fn render_top_bar(
+    pub(crate) fn render_canvas_header(
         &mut self,
         ui: &mut egui::Ui,
         size_class: SizeClass,
         has_sidebar: bool,
     ) {
-        let show_actions_inline = matches!(size_class, SizeClass::Large);
+        let compact = matches!(size_class, SizeClass::Narrow | SizeClass::Tight);
         let tight = matches!(size_class, SizeClass::Tight);
 
-        ui.horizontal(|ui| {
-            // When the left sidebar is hidden (Narrow / Tight), show brand + quick nav menu
-            if !has_sidebar {
+        // Compact brand & quick utilities row when sidebar is hidden (< 900 px)
+        if !has_sidebar {
+            ui.horizontal(|ui| {
                 ui.add(
                     egui::Image::new(egui::include_image!("../../assets/logo.png"))
-                        .fit_to_exact_size(egui::vec2(26.0, 26.0))
-                        .corner_radius(egui::CornerRadius::same(6)),
+                        .fit_to_exact_size(vec2(26.0, 26.0))
+                        .corner_radius(CornerRadius::same(7)),
                 );
-                ui.add_space(4.0);
-                if tight {
-                    ui.label(
-                        RichText::new("Hub")
-                            .size(18.0)
-                            .strong()
-                            .color(theme::text_primary()),
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(if tight { "Hub" } else { "AppImage Hub" })
+                        .font(fonts::bold(17.0))
+                        .color(theme::text_primary()),
+                );
+
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    if theme::pill_action(ui, Some(Icon::Plus), "Add", ButtonTone::Primary, 30.0)
+                        .clicked()
+                    {
+                        self.open_add_form();
+                    }
+                    if theme::icon_button(ui, Icon::Settings, 30.0, false, "Settings (Ctrl+,)")
+                        .clicked()
+                    {
+                        self.open_settings(ui.ctx());
+                    }
+                    let (theme_icon, theme_tip) = if theme::is_light() {
+                        (Icon::Moon, "Switch to Dark theme")
+                    } else {
+                        (Icon::Sun, "Switch to Light theme")
+                    };
+                    if theme::icon_button(ui, theme_icon, 30.0, false, theme_tip).clicked() {
+                        self.toggle_theme_mode(ui.ctx());
+                    }
+                    if theme::icon_button(
+                        ui,
+                        Icon::Command,
+                        30.0,
+                        false,
+                        "Command Palette (Ctrl+K)",
                     )
-                    .on_hover_text("AppImage Hub");
-                } else {
-                    ui.label(
-                        RichText::new("AppImage Hub")
-                            .size(18.0)
-                            .strong()
-                            .color(theme::text_primary()),
-                    );
-                }
-                ui.add_space(theme::SPACE_SM);
-            }
-
-            // Pill-shaped search box (ytm-rs style) when viewing the library
-            if !self.show_settings {
-                let search_w: f32 = match size_class {
-                    SizeClass::Large => 280.0,
-                    SizeClass::Medium => 220.0,
-                    SizeClass::Narrow => 160.0,
-                    SizeClass::Tight => 108.0,
-                };
-                egui::Frame::new()
-                    .fill(theme::surface_raised())
-                    .stroke(egui::Stroke::new(1.0_f32, theme::border()))
-                    .corner_radius(egui::CornerRadius::same(theme::RADIUS_PILL))
-                    .inner_margin(egui::Margin::symmetric(12, 5))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            let clear_w: f32 = if self.search_query.is_empty() { 0.0 } else { 20.0 };
-                            ui.add_sized(
-                                [(search_w - clear_w - 24.0).max(60.0), 22.0],
-                                egui::TextEdit::singleline(&mut self.search_query)
-                                    .frame(false)
-                                    .hint_text(
-                                        RichText::new("Search apps…").color(theme::text_muted()),
-                                    ),
-                            );
-                            if !self.search_query.is_empty()
-                                && ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new("×")
-                                                .size(14.0)
-                                                .color(theme::text_muted()),
-                                        )
-                                        .frame(false),
-                                    )
-                                    .on_hover_text("Clear search")
-                                    .clicked()
-                            {
-                                self.search_query.clear();
-                            }
-                        });
-                    });
-            }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.render_toolbar_actions(ui, show_actions_inline, has_sidebar);
+                    .clicked()
+                    {
+                        self.palette.toggle();
+                    }
+                });
             });
-        });
 
-        // On Narrow / Tight viewports (no sidebar), show a clean wrapped filter pill strip
-        if !has_sidebar && !self.show_settings {
-            ui.add_space(theme::SPACE_SM);
+            ui.add_space(theme::SPACE_MD);
+
+            // Horizontally wrapped filter pills on Narrow/Tight
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
                 let updates_count = self.updates_available_count();
                 for filter in NavFilter::ALL {
                     let active = self.nav_filter == filter;
@@ -102,152 +82,257 @@ impl ManagerApp {
                     } else {
                         filter.label().to_string()
                     };
-                    let btn = if active {
-                        theme::primary_button(label).min_size(egui::vec2(64.0, 26.0))
+                    let tone = if active {
+                        ButtonTone::SubtleAccent
                     } else {
-                        theme::ghost_button(label).min_size(egui::vec2(64.0, 26.0))
+                        ButtonTone::Ghost
                     };
-                    if ui.add(btn).clicked() {
+                    if theme::pill_action(ui, None, &label, tone, 28.0).clicked() {
                         self.nav_filter = filter;
                     }
                 }
             });
+
+            ui.add_space(theme::SPACE_SM);
         }
-    }
 
-    fn update_all_label_text(&self) -> String {
-        let updates_count = self.updates_available_count();
-        if updates_count > 0 {
-            format!("Update All ({updates_count})")
-        } else {
-            "Update All".to_string()
-        }
-    }
-
-    fn check_updates_label_text(&self) -> &'static str {
-        if self.update_check.is_some() {
-            "Checking updates…"
-        } else {
-            "Check All Updates"
-        }
-    }
-
-    pub(crate) fn render_toolbar_actions(
-        &mut self,
-        ui: &mut egui::Ui,
-        inline: bool,
-        has_sidebar: bool,
-    ) {
-        if inline {
-            if self.hub_update_url.is_some() || self.hub_update_progress.is_some() {
-                let hub_progress = self.hub_update_progress;
-                let hub_enabled = hub_progress.is_none();
-                let hub_clicked = progress_button(
-                    ui,
-                    "Update Hub",
-                    "Updating Hub…",
-                    hub_progress,
-                    hub_enabled,
-                    148.0,
-                )
-                .clicked();
-                if hub_clicked && hub_enabled {
-                    self.start_hub_update();
-                }
-            }
-
-            let updates_count = self.updates_available_count();
-            let has_active_downloads = !self.ops.is_empty();
-            let update_all_label = self.update_all_label_text();
-            let update_all_clicked = ui
-                .add_enabled(
-                    !has_active_downloads && updates_count > 0,
-                    theme::ghost_button(update_all_label),
-                )
-                .on_disabled_hover_text(if has_active_downloads {
-                    "Wait for active downloads to finish"
-                } else {
-                    "No updates available"
-                })
-                .clicked();
-            if update_all_clicked {
-                self.update_all();
-            }
-
-            let check_progress = self
-                .update_check
-                .as_ref()
-                .map(UpdateCheckProgress::fraction);
-            let checking = check_progress.is_some();
-            let check_clicked = check_updates_button(ui, check_progress, !checking).clicked();
-            if check_clicked && !checking {
-                self.check_all_updates();
-            }
-        } else {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if !has_sidebar {
-                    if ui
-                        .add(theme::add_button("+ Add").min_size(egui::vec2(68.0, 30.0)))
-                        .clicked()
-                    {
-                        if self.show_settings {
-                            self.close_settings(ui.ctx());
-                        }
-                        self.open_add_form();
-                    }
-                    let settings_btn = if self.show_settings {
-                        theme::primary_button("Settings").min_size(egui::vec2(74.0, 30.0))
-                    } else {
-                        theme::secondary_button("Settings").min_size(egui::vec2(74.0, 30.0))
-                    };
-                    if ui
-                        .add(settings_btn)
-                        .on_hover_text("Themes, storage, updates, and GitHub API")
-                        .clicked()
-                    {
-                        if self.show_settings {
-                            self.close_settings(ui.ctx());
-                        } else {
-                            self.open_settings();
-                        }
-                    }
-                }
-                ui.menu_button("Actions", |ui| {
-                    if self.hub_update_url.is_some() {
-                        if self.hub_update_progress.is_some() {
-                            ui.add_enabled(false, egui::Button::new("Updating Hub…"));
-                        } else if ui.button("Update Hub").clicked() {
-                            self.start_hub_update();
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                    }
-
-                    let checking = self.update_check.is_some();
-                    let check_label = self.check_updates_label_text();
-                    let check_clicked = ui
-                        .add_enabled(!checking, egui::Button::new(check_label))
-                        .clicked();
-                    if check_clicked {
-                        self.check_all_updates();
-                        ui.close_menu();
-                    }
-
-                    let updates_count = self.updates_available_count();
-                    let has_active_downloads = !self.ops.is_empty();
-                    let update_all_label = self.update_all_label_text();
-                    let update_all_clicked = ui
-                        .add_enabled(
-                            !has_active_downloads && updates_count > 0,
-                            egui::Button::new(update_all_label),
-                        )
-                        .clicked();
-                    if update_all_clicked {
-                        self.update_all();
-                        ui.close_menu();
-                    }
+        // Main Hero Header row (Title on left, Search + Controls + CTA on right)
+        if compact {
+            ui.horizontal(|ui| {
+                self.render_search_pill(ui, (ui.available_width() - 122.0).max(110.0));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    self.render_sort_button(ui);
+                    self.render_view_toggle(ui);
+                    self.render_sync_icon_button(ui);
                 });
             });
+        } else {
+            ui.horizontal(|ui| {
+                let page_title = match self.nav_filter {
+                    NavFilter::All => "All Apps",
+                    NavFilter::Updates => "Updates Available",
+                    NavFilter::Github => "GitHub Apps",
+                    NavFilter::Local => "Local AppImages",
+                };
+                ui.label(
+                    RichText::new(page_title)
+                        .font(fonts::bold(24.0))
+                        .color(theme::text_primary()),
+                );
+
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+
+                    if theme::pill_action(
+                        ui,
+                        Some(Icon::Plus),
+                        "Add App",
+                        ButtonTone::Primary,
+                        34.0,
+                    )
+                    .on_hover_text("Add or install an AppImage (Ctrl+N)")
+                    .clicked()
+                    {
+                        self.open_add_form();
+                    }
+
+                    self.render_sync_icon_button(ui);
+                    self.render_sort_button(ui);
+                    self.render_view_toggle(ui);
+
+                    let search_w = if size_class == SizeClass::Large {
+                        240.0
+                    } else {
+                        175.0
+                    };
+                    self.render_search_pill(ui, search_w);
+                });
+            });
+        }
+    }
+
+    fn render_search_pill(&mut self, ui: &mut egui::Ui, width: f32) {
+        let p = theme::current();
+        egui::Frame::new()
+            .fill(p.surface)
+            .stroke(Stroke::new(1.0_f32, p.border))
+            .corner_radius(CornerRadius::same(theme::RADIUS_PILL))
+            .inner_margin(Margin::symmetric(12, 0))
+            .show(ui, |ui| {
+                ui.allocate_ui_with_layout(
+                    vec2((width - 24.0).max(80.0), 34.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        icons::widget(ui, Icon::Search, 14.0, p.text_muted);
+                        let clear_w: f32 = if self.search_query.is_empty() { 0.0 } else { 20.0 };
+                        ui.add_sized(
+                            [(width - 54.0 - clear_w).max(52.0), 22.0],
+                            egui::TextEdit::singleline(&mut self.search_query)
+                                .frame(false)
+                                .vertical_align(Align::Center)
+                                .font(fonts::regular(13.0))
+                                .hint_text(
+                                    RichText::new("Filter apps…")
+                                        .font(fonts::regular(13.0))
+                                        .color(p.text_muted),
+                                ),
+                        );
+                        if !self.search_query.is_empty()
+                            && theme::icon_button(ui, Icon::Close, 18.0, false, "Clear filter")
+                                .clicked()
+                        {
+                            self.search_query.clear();
+                        }
+                    },
+                );
+            });
+    }
+
+    fn render_view_toggle(&mut self, ui: &mut egui::Ui) {
+        let p = theme::current();
+        egui::Frame::new()
+            .fill(p.surface)
+            .stroke(Stroke::new(1.0_f32, p.border))
+            .corner_radius(CornerRadius::same(theme::RADIUS_PILL))
+            .inner_margin(Margin::same(3))
+            .show(ui, |ui| {
+                ui.allocate_ui_with_layout(
+                    vec2(58.0, 28.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        if theme::icon_button(
+                            ui,
+                            Icon::LayoutGrid,
+                            28.0,
+                            self.view_mode == ViewMode::Grid,
+                            "Grid view",
+                        )
+                        .clicked()
+                        {
+                            self.view_mode = ViewMode::Grid;
+                        }
+                        if theme::icon_button(
+                            ui,
+                            Icon::LayoutList,
+                            28.0,
+                            self.view_mode == ViewMode::List,
+                            "List view",
+                        )
+                        .clicked()
+                        {
+                            self.view_mode = ViewMode::List;
+                        }
+                    },
+                );
+            });
+    }
+
+    fn render_sort_button(&mut self, ui: &mut egui::Ui) {
+        let popup_id = ui.make_persistent_id("header_sort_popover");
+        let is_open = ui.memory(|m| m.is_popup_open(popup_id));
+        let tip = format!("Sort by: {}", self.sort_by.label());
+        let p = theme::current();
+        let (rect, resp) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
+        let resp = resp
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(tip);
+        let hover = ui.ctx().animate_bool_responsive(resp.id, resp.hovered());
+        let cr = CornerRadius::same(theme::RADIUS_PILL);
+        let fill = if is_open {
+            p.accent_soft
+        } else {
+            theme::lerp_color(p.surface, p.surface_hover, hover)
+        };
+        let fg = if is_open {
+            p.accent
+        } else {
+            theme::lerp_color(p.text_secondary, p.text_primary, hover)
+        };
+        ui.painter().rect_filled(rect, cr, fill);
+        ui.painter().rect_stroke(
+            rect,
+            cr,
+            Stroke::new(1.0_f32, if is_open { theme::with_alpha(p.accent, 90) } else { p.border }),
+            egui::StrokeKind::Inside,
+        );
+        icons::paint(ui.painter(), Icon::Sliders, rect.center(), 15.0, fg);
+        if resp.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(popup_id));
+        }
+
+        egui::popup_below_widget(
+            ui,
+            popup_id,
+            &resp,
+            egui::PopupCloseBehavior::CloseOnClickOutside,
+            |ui| {
+                ui.set_width(152.0);
+                ui.label(theme::section_heading("Sort By"));
+                ui.add_space(4.0);
+                for sort in AppSortBy::ALL {
+                    let active = self.sort_by == sort;
+                    let icon = if active { Icon::Check } else { Icon::Sliders };
+                    if theme::popover_item(ui, icon, sort.label(), false).clicked() {
+                        self.sort_by = sort;
+                        ui.memory_mut(|m| m.close_popup());
+                    }
+                }
+            },
+        );
+    }
+
+    fn render_sync_icon_button(&mut self, ui: &mut egui::Ui) {
+        let checking = self.update_check.is_some();
+        let (rect, resp) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
+        let tip = if let Some(prog) = &self.update_check {
+            format!("Checking updates ({}%)…", (prog.fraction() * 100.0).round() as i32)
+        } else {
+            "Check all apps for updates".to_string()
+        };
+        let resp = resp
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(tip);
+        let p = theme::current();
+        let hover = ui.ctx().animate_bool_responsive(resp.id, resp.hovered() && !checking);
+        let cr = CornerRadius::same(theme::RADIUS_PILL);
+        let fill = if checking {
+            p.accent_soft
+        } else {
+            theme::lerp_color(p.surface, p.surface_hover, hover)
+        };
+        ui.painter().rect_filled(rect, cr, fill);
+        ui.painter().rect_stroke(
+            rect,
+            cr,
+            Stroke::new(
+                1.0_f32,
+                if checking {
+                    theme::with_alpha(p.accent, 90)
+                } else {
+                    p.border
+                },
+            ),
+            egui::StrokeKind::Inside,
+        );
+
+        let angle = if checking {
+            ui.ctx().request_repaint();
+            (ui.input(|i| i.time) as f32) * 3.8
+        } else {
+            0.0
+        };
+        let fg = if checking {
+            p.accent
+        } else {
+            theme::lerp_color(p.text_secondary, p.text_primary, hover)
+        };
+        icons::paint_rotated(ui.painter(), Icon::Refresh, rect.center(), 15.0, fg, angle);
+
+        if resp.clicked() && !checking {
+            self.check_all_updates();
         }
     }
 }

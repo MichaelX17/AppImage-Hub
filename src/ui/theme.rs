@@ -1,15 +1,19 @@
-//! Dynamic visual design system inspired by `ytm-rs`.
+//! Modern spatial visual design system ("Obsidian / Alabaster Studio").
 //!
-//! Supports Dark and Light base themes with full detail-color personalization
-//! (accent, card surface tint, border/divider stroke, highlight/badge detail,
-//! and corner roundness). Every color getter reads the active [`Palette`] so
-//! changing any setting updates the entire UI live on the next frame.
+//! Inspired by Linear, Raycast, Setapp, and macOS Sequoia:
+//! - Tonal depth & hairline borders instead of heavy box outlines
+//! - Real Regular / Medium / Bold grotesque typography + Monospace tabular figures
+//! - Smooth micro-interaction hover transitions (`animate_bool_responsive`)
+//! - Dark & Light base themes with full custom detail-color personalization
 
 use crate::config::{ThemeMode, ThemeSettings};
+use crate::ui::fonts;
+use crate::ui::icons::{self, Icon};
 use eframe::egui::{
-    self, Color32, CornerRadius, Margin, Rect, RichText, Sense, Stroke, Style, Visuals, pos2, vec2,
+    self, Align2, Color32, CornerRadius, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Style,
+    Visuals, pos2, vec2,
 };
-use std::sync::{OnceLock, RwLock};
+use std::cell::Cell;
 
 // ─── Layout spacing & sizing tokens ────────────────────────────────────────
 pub const RADIUS_PILL: u8 = 255;
@@ -20,21 +24,105 @@ pub const SPACE_MD: f32 = 12.0;
 pub const SPACE_LG: f32 = 16.0;
 pub const SPACE_XL: f32 = 24.0;
 
-pub const MENU_WIDTH: f32 = 200.0;
-pub const MENU_ITEM_HEIGHT: f32 = 36.0;
-pub const MENU_HEIGHT: f32 = 140.0;
+pub const MENU_WIDTH: f32 = 204.0;
+pub const MENU_ITEM_HEIGHT: f32 = 34.0;
+pub const MENU_HEIGHT: f32 = 136.0;
 
-/// Curated accent swatches shown in Settings › Appearance.
+/// Curated accent swatches for quick personalization.
 pub const ACCENT_PRESETS: &[(&str, [u8; 3])] = &[
-    ("Crimson", [0xFF, 0x30, 0x48]),
-    ("Violet", [0xA8, 0x55, 0xF7]),
-    ("Ocean", [0x3B, 0x82, 0xF6]),
-    ("Emerald", [0x10, 0xB9, 0x81]),
-    ("Amber", [0xF5, 0x9E, 0x0B]),
-    ("Cyan", [0x06, 0xB6, 0xD4]),
-    ("Rose", [0xF4, 0x3F, 0x5E]),
-    ("Indigo", [0x63, 0x66, 0xF1]),
+    ("Linear Indigo", [0x63, 0x66, 0xF1]),
+    ("Raycast Crimson", [0xFF, 0x3B, 0x5C]),
+    ("Emerald Mint", [0x10, 0xB9, 0x81]),
+    ("Sky Blue", [0x38, 0xBD, 0xF8]),
+    ("Violet Pulse", [0xA8, 0x55, 0xF7]),
+    ("Amber Gold", [0xF5, 0x9E, 0x0B]),
+    ("Coral Sunset", [0xFB, 0x71, 0x85]),
+    ("Teal Frost", [0x14, 0xB8, 0xA6]),
 ];
+
+/// Curated complete looks (Base mode + custom accent/detail harmonies).
+pub struct ThemePreset {
+    pub name: &'static str,
+    pub subtitle: &'static str,
+    pub settings: ThemeSettings,
+}
+
+pub fn curated_presets() -> Vec<ThemePreset> {
+    vec![
+        ThemePreset {
+            name: "Obsidian Indigo",
+            subtitle: "Linear-inspired dark",
+            settings: ThemeSettings {
+                mode: ThemeMode::Dark,
+                accent_rgb: [0x63, 0x66, 0xF1],
+                custom_surface_rgb: None,
+                custom_border_rgb: None,
+                custom_detail_rgb: Some([0x81, 0x8C, 0xF8]),
+                corner_radius: 14,
+            },
+        },
+        ThemePreset {
+            name: "Crimson Studio",
+            subtitle: "Raycast-style dark",
+            settings: ThemeSettings {
+                mode: ThemeMode::Dark,
+                accent_rgb: [0xFF, 0x3B, 0x5C],
+                custom_surface_rgb: Some([0x1A, 0x15, 0x1C]),
+                custom_border_rgb: None,
+                custom_detail_rgb: Some([0xFF, 0x6B, 0x81]),
+                corner_radius: 14,
+            },
+        },
+        ThemePreset {
+            name: "Midnight Emerald",
+            subtitle: "Deep slate + mint",
+            settings: ThemeSettings {
+                mode: ThemeMode::Dark,
+                accent_rgb: [0x10, 0xB9, 0x81],
+                custom_surface_rgb: Some([0x11, 0x19, 0x1B]),
+                custom_border_rgb: None,
+                custom_detail_rgb: Some([0x34, 0xD3, 0x99]),
+                corner_radius: 14,
+            },
+        },
+        ThemePreset {
+            name: "Alabaster Light",
+            subtitle: "Crisp studio light",
+            settings: ThemeSettings {
+                mode: ThemeMode::Light,
+                accent_rgb: [0x4F, 0x46, 0xE5],
+                custom_surface_rgb: None,
+                custom_border_rgb: None,
+                custom_detail_rgb: Some([0x63, 0x66, 0xF1]),
+                corner_radius: 14,
+            },
+        },
+        ThemePreset {
+            name: "Nordic Daylight",
+            subtitle: "Cool mist + ocean",
+            settings: ThemeSettings {
+                mode: ThemeMode::Light,
+                accent_rgb: [0x02, 0x84, 0xC7],
+                custom_surface_rgb: Some([0xF0, 0xF7, 0xFF]),
+                custom_border_rgb: Some([0xBA, 0xD4, 0xEA]),
+                custom_detail_rgb: Some([0x0E, 0xA5, 0xE9]),
+                corner_radius: 14,
+            },
+        },
+        ThemePreset {
+            name: "Warm Porcelain",
+            subtitle: "Soft sand + coral",
+            settings: ThemeSettings {
+                mode: ThemeMode::Light,
+                accent_rgb: [0xE1, 0x1D, 0x48],
+                custom_surface_rgb: Some([0xFF, 0xF8, 0xF6]),
+                custom_border_rgb: None,
+                custom_detail_rgb: Some([0xF4, 0x3F, 0x5E]),
+                corner_radius: 16,
+            },
+        },
+    ]
+}
 
 // ─── Active Palette ────────────────────────────────────────────────────────
 
@@ -47,7 +135,9 @@ pub struct Palette {
     pub surface_raised: Color32,
     pub surface_hover: Color32,
     pub border: Color32,
+    pub border_hover: Color32,
     pub divider: Color32,
+    pub specular: Color32,
     pub text_primary: Color32,
     pub text_secondary: Color32,
     pub text_muted: Color32,
@@ -79,84 +169,96 @@ impl Palette {
             settings.accent_rgb[2],
         );
         let accent_hover = if light {
-            darken(accent, 0.12)
+            darken(accent, 0.10)
         } else {
-            lighten(accent, 0.16)
+            lighten(accent, 0.14)
         };
-        let accent_soft = with_alpha(accent, if light { 30 } else { 42 });
+        let accent_soft = with_alpha(accent, if light { 26 } else { 36 });
         let on_accent = contrast_on(accent);
 
-        // Base Dark / Light tokens directly modeled after ytm-rs
         let (base_bg, base_sidebar, base_surface, base_raised, base_hover) = if light {
             (
-                Color32::from_rgb(0xF6, 0xF4, 0xF8), // ytm-rs BG_LIGHT
-                Color32::from_rgb(0xEF, 0xEC, 0xF3), // subtle sidebar contrast
-                Color32::from_rgb(0xFC, 0xFB, 0xFD), // ytm-rs surface_fill light
-                Color32::from_rgb(0xFF, 0xFF, 0xFF), // raised inputs / popups
-                Color32::from_rgb(0xEB, 0xE7, 0xF0), // hover fill
+                Color32::from_rgb(0xF5, 0xF5, 0xF8), // Soft alabaster canvas
+                Color32::from_rgb(0xED, 0xED, 0xF2), // Gentle sidebar
+                Color32::from_rgb(0xFF, 0xFF, 0xFF), // Clean elevated cards
+                Color32::from_rgb(0xF1, 0xF1, 0xF6), // Soft inputs & pills
+                Color32::from_rgb(0xE8, 0xE8, 0xF0), // Gentle hover
             )
         } else {
             (
-                Color32::from_rgb(0x0C, 0x0A, 0x0E), // ytm-rs BG
-                Color32::from_rgb(0x13, 0x10, 0x17), // subtle sidebar panel
-                Color32::from_rgb(0x1C, 0x18, 0x20), // ytm-rs surface_fill dark
-                Color32::from_rgb(0x26, 0x22, 0x2A), // ytm-rs menu_color dark
-                Color32::from_rgb(0x30, 0x2B, 0x36), // hover fill
+                Color32::from_rgb(0x11, 0x11, 0x16), // Soft deep slate canvas
+                Color32::from_rgb(0x15, 0x15, 0x1C), // Soft inset sidebar
+                Color32::from_rgb(0x1B, 0x1B, 0x24), // Soft elevated Bento card
+                Color32::from_rgb(0x23, 0x23, 0x2E), // Soft interactive pill/input
+                Color32::from_rgb(0x2B, 0x2B, 0x38), // Gentle hover surface
             )
         };
 
-        // Optional custom surface tint (blended smoothly so contrast stays intact)
         let (surface, surface_raised, surface_hover) = match settings.custom_surface_rgb {
             Some([r, g, b]) => {
                 let tint = Color32::from_rgb(r, g, b);
-                let s = lerp_color(base_surface, tint, 0.45);
+                let s = lerp_color(base_surface, tint, 0.42);
                 let sr = if light {
-                    lighten(s, 0.06)
+                    darken(s, 0.04)
                 } else {
-                    lighten(s, 0.08)
+                    lighten(s, 0.07)
                 };
                 let sh = if light {
-                    darken(s, 0.07)
+                    darken(s, 0.08)
                 } else {
-                    lighten(s, 0.14)
+                    lighten(s, 0.13)
                 };
                 (s, sr, sh)
             }
             None => (base_surface, base_raised, base_hover),
         };
 
-        // Optional custom border / divider color
-        let (border, divider) = match settings.custom_border_rgb {
+        // Always pre-blend borders, dividers, and specular highlights into 100% opaque
+        // RGB colors (alpha = 255). Translucent strokes on Linux/Wayland compositors can
+        // punch holes in the framebuffer alpha channel and show windows behind the app.
+        let (border, border_hover, divider) = match settings.custom_border_rgb {
             Some([r, g, b]) => {
                 let b_col = Color32::from_rgb(r, g, b);
-                (with_alpha(b_col, 175), with_alpha(b_col, 95))
+                (
+                    lerp_color(surface, b_col, 0.58),
+                    lerp_color(surface, b_col, 0.88),
+                    lerp_color(base_bg, b_col, 0.35),
+                )
             }
             None => {
                 if light {
                     (
-                        Color32::from_rgba_unmultiplied(22, 20, 26, 26),
-                        Color32::from_rgba_unmultiplied(22, 20, 26, 18),
+                        lerp_color(surface, Color32::from_rgb(15, 15, 26), 0.08),
+                        lerp_color(surface, Color32::from_rgb(15, 15, 26), 0.16),
+                        lerp_color(base_bg, Color32::from_rgb(15, 15, 26), 0.07),
                     )
                 } else {
                     (
-                        Color32::from_rgba_unmultiplied(255, 255, 255, 26),
-                        Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+                        lerp_color(surface, Color32::WHITE, 0.065),
+                        lerp_color(surface, Color32::WHITE, 0.14),
+                        lerp_color(base_bg, Color32::WHITE, 0.055),
                     )
                 }
             }
         };
 
+        let specular = if light {
+            lerp_color(surface, Color32::WHITE, 0.75)
+        } else {
+            lerp_color(surface, Color32::WHITE, 0.05)
+        };
+
         let (text_primary, text_secondary, text_muted) = if light {
             (
-                Color32::from_rgb(0x16, 0x14, 0x1A), // ytm-rs TEXT_LIGHT
-                Color32::from_rgb(0x56, 0x52, 0x5E), // ytm-rs TEXT_DIM_LIGHT
-                Color32::from_rgb(0x7C, 0x76, 0x84), // ytm-rs TEXT_FAINT_LIGHT
+                Color32::from_rgb(0x18, 0x18, 0x22),
+                Color32::from_rgb(0x56, 0x56, 0x68),
+                Color32::from_rgb(0x84, 0x84, 0x96),
             )
         } else {
             (
-                Color32::from_rgb(0xF2, 0xF0, 0xF5), // ytm-rs TEXT
-                Color32::from_rgb(0xB2, 0xAC, 0xBA), // ytm-rs TEXT_DIM
-                Color32::from_rgb(0x82, 0x7C, 0x8C), // ytm-rs TEXT_FAINT
+                Color32::from_rgb(0xEE, 0xEE, 0xF5),
+                Color32::from_rgb(0xA2, 0xA2, 0xB6),
+                Color32::from_rgb(0x6E, 0x6E, 0x84),
             )
         };
 
@@ -164,32 +266,32 @@ impl Palette {
             Some([r, g, b]) => Color32::from_rgb(r, g, b),
             None => accent_hover,
         };
-        let detail_soft = with_alpha(detail, if light { 28 } else { 42 });
+        let detail_soft = with_alpha(detail, if light { 26 } else { 36 });
 
         let success = if light {
             Color32::from_rgb(0x15, 0x80, 0x3D)
         } else {
-            Color32::from_rgb(0x22, 0xC5, 0x5E)
+            Color32::from_rgb(0x34, 0xD3, 0x99)
         };
         let warning = if light {
             Color32::from_rgb(0xB4, 0x53, 0x09)
         } else {
-            Color32::from_rgb(0xF5, 0x9E, 0x0B)
+            Color32::from_rgb(0xFB, 0xBF, 0x24)
         };
         let danger = if light {
             Color32::from_rgb(0xDC, 0x26, 0x26)
         } else {
-            Color32::from_rgb(0xEF, 0x44, 0x44)
+            Color32::from_rgb(0xF8, 0x71, 0x71)
         };
         let neutral = if light {
-            Color32::from_rgb(0xE6, 0xE2, 0xEC)
+            Color32::from_rgb(0xE8, 0xE8, 0xF0)
         } else {
-            Color32::from_rgb(0x2A, 0x25, 0x32)
+            Color32::from_rgb(0x21, 0x21, 0x2D)
         };
 
         let radius_lg = settings.corner_radius.clamp(6, 18);
-        let radius_md = radius_lg.saturating_sub(3).max(4);
-        let radius_sm = radius_lg.saturating_sub(6).max(3);
+        let radius_md = radius_lg.saturating_sub(4).max(4);
+        let radius_sm = radius_lg.saturating_sub(7).max(3);
 
         Self {
             light,
@@ -199,7 +301,9 @@ impl Palette {
             surface_raised,
             surface_hover,
             border,
+            border_hover,
             divider,
+            specular,
             text_primary,
             text_secondary,
             text_muted,
@@ -210,13 +314,13 @@ impl Palette {
             detail,
             detail_soft,
             success,
-            success_soft: with_alpha(success, if light { 26 } else { 38 }),
+            success_soft: with_alpha(success, if light { 24 } else { 32 }),
             warning,
-            warning_soft: with_alpha(warning, if light { 28 } else { 40 }),
+            warning_soft: with_alpha(warning, if light { 26 } else { 36 }),
             danger,
-            danger_soft: with_alpha(danger, if light { 26 } else { 40 }),
+            danger_soft: with_alpha(danger, if light { 24 } else { 36 }),
             neutral,
-            neutral_soft: with_alpha(text_secondary, if light { 22 } else { 30 }),
+            neutral_soft: with_alpha(text_secondary, if light { 20 } else { 26 }),
             radius_sm,
             radius_md,
             radius_lg,
@@ -224,17 +328,13 @@ impl Palette {
     }
 }
 
-static PALETTE: OnceLock<RwLock<Palette>> = OnceLock::new();
-
-fn palette_lock() -> &'static RwLock<Palette> {
-    PALETTE.get_or_init(|| RwLock::new(Palette::from_settings(&ThemeSettings::default())))
+thread_local! {
+    static PALETTE: Cell<Palette> = Cell::new(Palette::from_settings(&ThemeSettings::default()));
 }
 
+#[inline]
 pub fn current() -> Palette {
-    palette_lock()
-        .read()
-        .map(|g| *g)
-        .unwrap_or_else(|_| Palette::from_settings(&ThemeSettings::default()))
+    PALETTE.with(Cell::get)
 }
 
 // ─── Dynamic color accessors ───────────────────────────────────────────────
@@ -259,6 +359,9 @@ pub fn surface_hover() -> Color32 {
 }
 pub fn border() -> Color32 {
     current().border
+}
+pub fn border_hover() -> Color32 {
+    current().border_hover
 }
 pub fn divider_color() -> Color32 {
     current().divider
@@ -316,9 +419,7 @@ pub fn radius_lg() -> u8 {
 
 pub fn apply_theme(ctx: &egui::Context, settings: &ThemeSettings) {
     let p = Palette::from_settings(settings);
-    if let Ok(mut guard) = palette_lock().write() {
-        *guard = p;
-    }
+    PALETTE.with(|cell| cell.set(p));
 
     let mut visuals = if p.light {
         Visuals::light()
@@ -328,51 +429,47 @@ pub fn apply_theme(ctx: &egui::Context, settings: &ThemeSettings) {
     visuals.override_text_color = Some(p.text_primary);
     visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
     visuals.panel_fill = p.bg;
-    visuals.window_fill = p.surface_raised;
+    visuals.window_fill = p.surface;
     visuals.window_stroke = Stroke::new(1.0_f32, p.border);
     visuals.window_corner_radius = CornerRadius::same(p.radius_lg);
     visuals.menu_corner_radius = CornerRadius::same(p.radius_lg);
 
     let shadow_color = if p.light {
-        Color32::from_black_alpha(28)
+        Color32::from_black_alpha(22)
     } else {
-        Color32::from_black_alpha(120)
+        Color32::from_black_alpha(140)
     };
     visuals.window_shadow = egui::epaint::Shadow {
-        offset: [0, 8],
-        blur: 24,
+        offset: [0, 10],
+        blur: 32,
         spread: 0,
         color: shadow_color,
     };
     visuals.popup_shadow = egui::epaint::Shadow {
-        offset: [0, 6],
-        blur: 18,
+        offset: [0, 8],
+        blur: 24,
         spread: 0,
         color: shadow_color,
     };
     visuals.extreme_bg_color = p.surface_raised;
     visuals.faint_bg_color = p.surface;
 
-    // Non-interactive
     visuals.widgets.noninteractive.bg_fill = p.surface;
     visuals.widgets.noninteractive.weak_bg_fill = p.surface;
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, p.text_secondary);
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, p.border);
 
-    // Idle
     visuals.widgets.inactive.bg_fill = p.surface_raised;
     visuals.widgets.inactive.weak_bg_fill = p.surface_raised;
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, p.text_primary);
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, p.border);
 
-    // Hover
     visuals.widgets.hovered.bg_fill = p.surface_hover;
     visuals.widgets.hovered.weak_bg_fill = p.surface_hover;
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, p.text_primary);
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, with_alpha(p.accent, 180));
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, p.border_hover);
     visuals.widgets.hovered.expansion = 0.0;
 
-    // Active / pressed
     visuals.widgets.active.bg_fill = p.accent;
     visuals.widgets.active.weak_bg_fill = p.accent;
     visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, p.on_accent);
@@ -381,9 +478,9 @@ pub fn apply_theme(ctx: &egui::Context, settings: &ThemeSettings) {
     visuals.widgets.open.bg_fill = p.surface_raised;
     visuals.widgets.open.weak_bg_fill = p.surface_raised;
     visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, p.text_primary);
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, with_alpha(p.accent, 160));
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, with_alpha(p.accent, 150));
 
-    visuals.selection.bg_fill = with_alpha(p.accent, if p.light { 60 } else { 100 });
+    visuals.selection.bg_fill = with_alpha(p.accent, if p.light { 50 } else { 85 });
     visuals.selection.stroke = Stroke::new(1.0_f32, p.accent);
     visuals.hyperlink_color = p.accent_hover;
 
@@ -405,8 +502,8 @@ pub fn apply_theme(ctx: &egui::Context, settings: &ThemeSettings) {
     style.spacing.item_spacing = vec2(SPACE_SM, SPACE_SM);
     style.spacing.button_padding = vec2(14.0, 7.0);
     style.spacing.interact_size.y = 32.0;
-    style.spacing.icon_width = 20.0;
-    style.spacing.icon_width_inner = 12.0;
+    style.spacing.icon_width = 18.0;
+    style.spacing.icon_width_inner = 10.0;
     style.spacing.icon_spacing = 8.0;
     style.spacing.window_margin = Margin::same(SPACE_MD as i8);
     style.spacing.menu_margin = Margin::same(SPACE_SM as i8);
@@ -418,9 +515,133 @@ pub fn apply(ctx: &egui::Context) {
     apply_theme(ctx, &ThemeSettings::default());
 }
 
-// ─── Frames & Containers (ytm-rs surface style) ────────────────────────────
+// ─── Ambient Canvas Lighting & Elevated Surfaces ───────────────────────────
 
-/// Elevated card surface for AppImage rows.
+/// Paints a hardware-interpolated, butter-smooth whisper-soft ambient tint at the
+/// top edge of the canvas (zero banding).
+pub fn paint_canvas_ambient(ui: &egui::Ui, rect: Rect) {
+    let p = current();
+    let band_h = 180.0_f32.min(rect.height());
+    if band_h <= 1.0 || rect.width() <= 1.0 {
+        return;
+    }
+    let top_alpha = if p.light { 10 } else { 15 };
+    let top_col = with_alpha(p.accent, top_alpha);
+    let bottom_col = Color32::TRANSPARENT;
+
+    let mut mesh = egui::Mesh::default();
+    let y0 = rect.top();
+    let y1 = rect.top() + band_h;
+    mesh.colored_vertex(pos2(rect.left(), y0), top_col);
+    mesh.colored_vertex(pos2(rect.right(), y0), top_col);
+    mesh.colored_vertex(pos2(rect.right(), y1), bottom_col);
+    mesh.colored_vertex(pos2(rect.left(), y1), bottom_col);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    ui.painter().add(egui::Shape::mesh(mesh));
+}
+
+/// Paints a distinct tonal surface for top-level dashboard Info / Stat cards
+/// (Library, Updates, AppImage Hub / Sync Status) so they visually separate from
+/// regular AppImage cards in both Dark and Light themes.
+pub fn paint_info_card(painter: &egui::Painter, rect: Rect, hover_t: f32, soft_accent: bool) {
+    let p = current();
+    let r = CornerRadius::same(p.radius_lg);
+
+    // Distinct tonal base: soft cool slate tint in Light mode (vs pure white app cards),
+    // and deeper recessed slate in Dark mode (vs elevated app cards).
+    let base_info = if p.light {
+        lerp_color(p.sidebar_bg, p.surface_raised, 0.45)
+    } else {
+        lerp_color(p.bg, p.surface, 0.48)
+    };
+    let tinted = if soft_accent {
+        lerp_color(base_info, p.accent, if p.light { 0.075 } else { 0.095 })
+    } else {
+        base_info
+    };
+    let hover_target = if p.light {
+        darken(tinted, 0.03)
+    } else {
+        lighten(tinted, 0.04)
+    };
+    let fill = lerp_color(tinted, hover_target, hover_t * 0.6);
+    painter.rect_filled(rect, r, fill);
+
+    let rest_stroke = if soft_accent {
+        lerp_color(tinted, p.accent, if p.light { 0.22 } else { 0.26 })
+    } else {
+        p.border
+    };
+    let hover_stroke = if soft_accent {
+        lerp_color(tinted, p.accent, if p.light { 0.38 } else { 0.42 })
+    } else {
+        p.border_hover
+    };
+    painter.rect_stroke(
+        rect,
+        r,
+        Stroke::new(1.0_f32, lerp_color(rest_stroke, hover_stroke, hover_t)),
+        StrokeKind::Inside,
+    );
+}
+
+/// Paints a soft, calm Bento card surface with gentle hover elevation, subtle
+/// light-mode shadow, and whisper-thin hairline border (never harsh neon strokes).
+pub fn paint_bento_card(painter: &egui::Painter, rect: Rect, hover_t: f32, soft_accent: bool) {
+    let p = current();
+    let r = CornerRadius::same(p.radius_lg);
+
+    // Whisper-soft ambient shadow on Light mode
+    if p.light {
+        let shadow_rect = rect.translate(vec2(0.0, 2.0 + hover_t * 1.5));
+        painter.rect_filled(
+            shadow_rect,
+            r,
+            Color32::from_black_alpha((8.0 + hover_t * 6.0) as u8),
+        );
+    }
+
+    let base_fill = if soft_accent {
+        lerp_color(p.surface, p.accent, if p.light { 0.025 } else { 0.04 })
+    } else {
+        p.surface
+    };
+    let fill = lerp_color(base_fill, p.surface_hover, hover_t * 0.45);
+    painter.rect_filled(rect, r, fill);
+
+    // Delicate top specular highlight
+    if rect.width() > 36.0 {
+        let inset = p.radius_lg as f32;
+        painter.line_segment(
+            [
+                pos2(rect.left() + inset, rect.top() + 0.75),
+                pos2(rect.right() - inset, rect.top() + 0.75),
+            ],
+            Stroke::new(1.0_f32, p.specular),
+        );
+    }
+
+    let rest_stroke = if soft_accent {
+        lerp_color(base_fill, p.accent, if p.light { 0.18 } else { 0.22 })
+    } else {
+        p.border
+    };
+    let hover_stroke = if soft_accent {
+        lerp_color(base_fill, p.accent, if p.light { 0.34 } else { 0.38 })
+    } else {
+        p.border_hover
+    };
+    let stroke_color = lerp_color(rest_stroke, hover_stroke, hover_t);
+    painter.rect_stroke(
+        rect,
+        r,
+        Stroke::new(1.0_f32, stroke_color),
+        StrokeKind::Inside,
+    );
+}
+
+/// Card surface frame for standard non-interactive containers.
 pub fn card_frame() -> egui::Frame {
     let p = current();
     egui::Frame::new()
@@ -430,61 +651,431 @@ pub fn card_frame() -> egui::Frame {
         .inner_margin(Margin::same(SPACE_LG as i8))
 }
 
-/// Side panel / sheet container.
+/// Floating drawer / sheet container.
 pub fn panel_frame() -> egui::Frame {
     let p = current();
+    let shadow_alpha = if p.light { 34 } else { 150 };
     egui::Frame::new()
         .fill(p.surface)
         .stroke(Stroke::new(1.0_f32, p.border))
-        .corner_radius(CornerRadius::same(p.radius_lg))
-        .inner_margin(Margin::same(SPACE_LG as i8))
+        .corner_radius(CornerRadius::same(p.radius_lg.saturating_add(2)))
+        .inner_margin(Margin::same(SPACE_XL as i8))
+        .shadow(egui::epaint::Shadow {
+            offset: [-6, 8],
+            blur: 32,
+            spread: 0,
+            color: Color32::from_black_alpha(shadow_alpha),
+        })
 }
 
-/// Grouped settings card (ytm-rs style: elevated rounded container with crisp border).
+/// Grouped settings card container.
 pub fn settings_card_frame() -> egui::Frame {
     let p = current();
-    egui::Frame::new()
+    let mut frame = egui::Frame::new()
         .fill(p.surface)
         .stroke(Stroke::new(1.0_f32, p.border))
         .corner_radius(CornerRadius::same(p.radius_lg))
-        .inner_margin(Margin::symmetric(SPACE_LG as i8, SPACE_MD as i8))
+        .inner_margin(Margin::symmetric(SPACE_LG as i8, SPACE_MD as i8));
+    if p.light {
+        frame = frame.shadow(egui::epaint::Shadow {
+            offset: [0, 2],
+            blur: 10,
+            spread: 0,
+            color: Color32::from_black_alpha(10),
+        });
+    }
+    frame
 }
 
 /// Popup / overflow menu frame.
 pub fn menu_frame() -> egui::Frame {
     let p = current();
-    let shadow_alpha = if p.light { 28 } else { 110 };
+    let shadow_alpha = if p.light { 32 } else { 130 };
     egui::Frame::new()
-        .fill(p.surface_raised)
-        .stroke(Stroke::new(1.0_f32, p.border))
+        .fill(if p.light { p.surface } else { p.surface_raised })
+        .stroke(Stroke::new(1.0_f32, p.border_hover))
         .corner_radius(CornerRadius::same(p.radius_lg))
-        .inner_margin(Margin::same(SPACE_SM as i8))
+        .inner_margin(Margin::same(6))
         .shadow(egui::epaint::Shadow {
-            offset: [0, 6],
-            blur: 18,
+            offset: [0, 8],
+            blur: 24,
             spread: 0,
             color: Color32::from_black_alpha(shadow_alpha),
         })
 }
 
-/// Modal dialog frame.
+/// Modal dialog / Command Palette frame.
 pub fn modal_frame() -> egui::Frame {
     let p = current();
-    let shadow_alpha = if p.light { 36 } else { 140 };
+    let shadow_alpha = if p.light { 42 } else { 170 };
     egui::Frame::new()
-        .fill(p.surface_raised)
-        .stroke(Stroke::new(1.0_f32, p.border))
+        .fill(p.surface)
+        .stroke(Stroke::new(1.0_f32, p.border_hover))
         .corner_radius(CornerRadius::same(p.radius_lg.saturating_add(2)))
         .inner_margin(Margin::same(SPACE_XL as i8))
         .shadow(egui::epaint::Shadow {
-            offset: [0, 10],
-            blur: 28,
+            offset: [0, 14],
+            blur: 40,
             spread: 0,
             color: Color32::from_black_alpha(shadow_alpha),
         })
 }
 
-// ─── Buttons & Controls ────────────────────────────────────────────────────
+// ─── Modern Custom-Painted Controls ────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ButtonTone {
+    Primary,
+    Secondary,
+    Ghost,
+    Danger,
+    SubtleAccent,
+}
+
+/// Modern pill button with optional vector icon, real Medium/Bold typography,
+/// and smooth animated hover transitions.
+pub fn pill_action(
+    ui: &mut egui::Ui,
+    icon: Option<Icon>,
+    label: &str,
+    tone: ButtonTone,
+    height: f32,
+) -> egui::Response {
+    let p = current();
+    let font = if matches!(tone, ButtonTone::Primary | ButtonTone::Danger) {
+        fonts::bold(13.0)
+    } else {
+        fonts::medium(13.0)
+    };
+    // Use PLACEHOLDER so `painter.galley(..., fg)` applies the dynamic theme text color
+    // in both Dark and Light modes (never baking white text onto light buttons).
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
+    let icon_w = if icon.is_some() { 15.0 + 6.0 } else { 0.0 };
+    let pad_x = if label.is_empty() { 10.0 } else { 14.0 };
+    let desired = vec2(galley.size().x + icon_w + pad_x * 2.0, height);
+
+    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let hover = ui.ctx().animate_bool_responsive(resp.id, resp.hovered() && ui.is_enabled());
+    let enabled_alpha = if ui.is_enabled() { 1.0_f32 } else { 0.42_f32 };
+
+    let (base_fill, hover_fill, fg, border_col) = match tone {
+        ButtonTone::Primary => (
+            lerp_color(p.accent, p.surface, if p.light { 0.06 } else { 0.10 }),
+            p.accent,
+            p.on_accent,
+            Color32::TRANSPARENT,
+        ),
+        ButtonTone::Secondary => (p.surface_raised, p.surface_hover, p.text_primary, p.border),
+        ButtonTone::Ghost => (
+            Color32::TRANSPARENT,
+            p.surface_hover,
+            p.text_secondary,
+            Color32::TRANSPARENT,
+        ),
+        ButtonTone::Danger => (
+            p.danger,
+            lighten(p.danger, 0.10),
+            Color32::WHITE,
+            Color32::TRANSPARENT,
+        ),
+        ButtonTone::SubtleAccent => (
+            with_alpha(p.accent, if p.light { 24 } else { 32 }),
+            with_alpha(p.accent, if p.light { 42 } else { 54 }),
+            if p.light { p.accent } else { lighten(p.accent, 0.22) },
+            with_alpha(p.accent, if p.light { 48 } else { 58 }),
+        ),
+    };
+
+    let fill = scale_alpha(lerp_color(base_fill, hover_fill, hover), enabled_alpha);
+    let fg = scale_alpha(
+        if matches!(tone, ButtonTone::Ghost) {
+            lerp_color(fg, p.text_primary, hover)
+        } else {
+            fg
+        },
+        enabled_alpha,
+    );
+
+    let cr = CornerRadius::same(RADIUS_PILL);
+    if fill.a() > 0 {
+        ui.painter().rect_filled(rect, cr, fill);
+    }
+    if border_col.a() > 0 {
+        let hover_border = if matches!(tone, ButtonTone::Secondary) {
+            lerp_color(border_col, p.border_hover, hover)
+        } else {
+            border_col
+        };
+        ui.painter().rect_stroke(
+            rect,
+            cr,
+            Stroke::new(1.0_f32, scale_alpha(hover_border, enabled_alpha)),
+            StrokeKind::Inside,
+        );
+    }
+
+    let content_w = galley.size().x + icon_w;
+    let mut x = rect.center().x - content_w / 2.0;
+    if let Some(ic) = icon {
+        icons::paint(ui.painter(), ic, pos2(x + 7.5, rect.center().y), 14.0, fg);
+        x += 15.0 + 6.0;
+    }
+    if !label.is_empty() {
+        ui.painter().galley(
+            pos2(x, rect.center().y - galley.size().y / 2.0 - 0.5),
+            galley,
+            fg,
+        );
+    }
+
+    resp
+}
+
+/// Crisp icon-only rounded button (32×32 default) with smooth hover fill.
+pub fn icon_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    size: f32,
+    active: bool,
+    tooltip: &str,
+) -> egui::Response {
+    let p = current();
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    let resp = resp
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(tooltip);
+    let hover = ui.ctx().animate_bool_responsive(resp.id, resp.hovered());
+
+    let fill = if active {
+        p.accent_soft
+    } else {
+        lerp_color(Color32::TRANSPARENT, p.surface_hover, hover)
+    };
+    let fg = if active {
+        p.accent
+    } else {
+        lerp_color(p.text_secondary, p.text_primary, hover)
+    };
+    let cr = CornerRadius::same(RADIUS_PILL);
+    if fill.a() > 0 {
+        ui.painter().rect_filled(rect, cr, fill);
+    }
+    if active {
+        ui.painter().rect_stroke(
+            rect,
+            cr,
+            Stroke::new(1.0_f32, with_alpha(p.accent, 65)),
+            StrokeKind::Inside,
+        );
+    }
+    icons::paint(ui.painter(), icon, rect.center(), size * 0.48, fg);
+    resp
+}
+
+/// Modern menu item inside a floating popover (icon + label, full-width hover pill).
+pub fn popover_item(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    label: &str,
+    danger: bool,
+) -> egui::Response {
+    let p = current();
+    let w = ui.available_width().max(160.0);
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, MENU_ITEM_HEIGHT), Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let hover = ui.ctx().animate_bool_responsive(resp.id, resp.hovered());
+
+    let hover_bg = if danger { p.danger_soft } else { p.surface_hover };
+    let fill = lerp_color(Color32::TRANSPARENT, hover_bg, hover);
+    let fg = if danger {
+        p.danger
+    } else {
+        lerp_color(p.text_primary, p.text_primary, hover)
+    };
+    let icon_fg = if danger {
+        p.danger
+    } else {
+        lerp_color(p.text_secondary, p.text_primary, hover)
+    };
+
+    if fill.a() > 0 {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(p.radius_md), fill);
+    }
+    icons::paint(
+        ui.painter(),
+        icon,
+        pos2(rect.left() + 18.0, rect.center().y),
+        15.0,
+        icon_fg,
+    );
+    ui.painter().text(
+        pos2(rect.left() + 36.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        fonts::medium(13.0),
+        fg,
+    );
+    resp
+}
+
+/// Sidebar / settings navigation row with vector icon, animated hover, accent
+/// indicator, and optional tabular count badge.
+pub fn nav_item(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    label: &str,
+    badge: Option<(usize, bool)>,
+    active: bool,
+) -> egui::Response {
+    let p = current();
+    let width = ui.available_width().max(40.0);
+    let height = 36.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let hover = ui.ctx().animate_bool_responsive(resp.id, resp.hovered());
+
+    let fill = if active {
+        p.accent_soft
+    } else {
+        lerp_color(Color32::TRANSPARENT, p.surface_hover, hover * 0.75)
+    };
+    let fg = if active {
+        p.accent
+    } else {
+        lerp_color(p.text_secondary, p.text_primary, hover)
+    };
+
+    let cr = CornerRadius::same(p.radius_md.max(8));
+    if fill.a() > 0 {
+        ui.painter().rect_filled(rect, cr, fill);
+    }
+    if active {
+        let bar = Rect::from_min_size(
+            pos2(rect.left() + 3.0, rect.center().y - 8.0),
+            vec2(3.0, 16.0),
+        );
+        ui.painter()
+            .rect_filled(bar, CornerRadius::same(2), p.accent);
+    }
+
+    icons::paint(
+        ui.painter(),
+        icon,
+        pos2(rect.left() + 19.0, rect.center().y),
+        15.5,
+        fg,
+    );
+
+    let font = if active {
+        fonts::bold(13.0)
+    } else {
+        fonts::medium(13.0)
+    };
+    ui.painter().text(
+        pos2(rect.left() + 36.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        font,
+        fg,
+    );
+
+    if let Some((count, highlight)) = badge.filter(|&(n, _)| n > 0) {
+        let count_str = count.to_string();
+        let pill_w = (count_str.len() as f32 * 7.0 + 14.0).max(22.0);
+        let pill_rect = Rect::from_center_size(
+            pos2(rect.right() - 10.0 - pill_w / 2.0, rect.center().y),
+            vec2(pill_w, 19.0),
+        );
+        let (pill_bg, pill_fg) = if highlight {
+            (p.accent, p.on_accent)
+        } else {
+            (p.neutral_soft, p.text_muted)
+        };
+        ui.painter()
+            .rect_filled(pill_rect, CornerRadius::same(RADIUS_PILL), pill_bg);
+        ui.painter().text(
+            pill_rect.center(),
+            Align2::CENTER_CENTER,
+            count_str,
+            fonts::mono(10.5),
+            pill_fg,
+        );
+    }
+
+    resp
+}
+
+/// Subtle keyboard shortcut cap (e.g. `Ctrl+K`).
+pub fn keycap(ui: &mut egui::Ui, text: &str) {
+    let p = current();
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), fonts::mono(10.0), p.text_muted);
+    let desired = vec2(galley.size().x + 10.0, 20.0);
+    let (rect, _) = ui.allocate_exact_size(desired, Sense::hover());
+    let cr = CornerRadius::same(5);
+    ui.painter().rect_filled(rect, cr, p.neutral_soft);
+    ui.painter()
+        .rect_stroke(rect, cr, Stroke::new(1.0_f32, p.border), StrokeKind::Inside);
+    ui.painter().galley(
+        pos2(
+            rect.center().x - galley.size().x / 2.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        p.text_muted,
+    );
+}
+
+/// Compact monospace version pill (`v2.4.0`).
+pub fn version_pill(ui: &mut egui::Ui, text: &str, fg: Color32, bg: Color32) {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), fonts::mono(10.5), fg);
+    let desired = vec2(galley.size().x + 14.0, 22.0);
+    let (rect, _) = ui.allocate_exact_size(desired, Sense::hover());
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(RADIUS_PILL), bg);
+    ui.painter().galley(
+        pos2(
+            rect.center().x - galley.size().x / 2.0,
+            rect.center().y - galley.size().y / 2.0 - 0.5,
+        ),
+        galley,
+        fg,
+    );
+}
+
+/// Refined status pill with a soft status dot + Medium label.
+pub fn status_pill(ui: &mut egui::Ui, text: &str, kind: BadgeKind) -> egui::Response {
+    let (fg, bg) = badge_colors(kind);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), fonts::medium(11.0), fg);
+    let desired = vec2(galley.size().x + 24.0, 22.0);
+    let (rect, resp) = ui.allocate_exact_size(desired, Sense::hover());
+    let cr = CornerRadius::same(RADIUS_PILL);
+    ui.painter().rect_filled(rect, cr, bg);
+    ui.painter()
+        .rect_stroke(rect, cr, Stroke::new(1.0_f32, with_alpha(fg, 36)), StrokeKind::Inside);
+    ui.painter()
+        .circle_filled(pos2(rect.left() + 10.0, rect.center().y), 2.8, fg);
+    ui.painter().galley(
+        pos2(
+            rect.left() + 17.0,
+            rect.center().y - galley.size().y / 2.0 - 0.5,
+        ),
+        galley,
+        fg,
+    );
+    resp
+}
+
+// ─── Legacy-compatible Button Helpers (modernized styling) ─────────────────
 
 fn pill(button: egui::Button<'static>, fill: Color32, min_width: f32) -> egui::Button<'static> {
     let p = current();
@@ -498,7 +1089,7 @@ fn pill(button: egui::Button<'static>, fill: Color32, min_width: f32) -> egui::B
 pub fn primary_button(text: impl Into<String>) -> egui::Button<'static> {
     let p = current();
     pill(
-        egui::Button::new(RichText::new(text.into()).color(p.on_accent).strong()),
+        egui::Button::new(RichText::new(text.into()).font(fonts::bold(13.0)).color(p.on_accent)),
         p.accent,
         84.0,
     )
@@ -508,7 +1099,7 @@ pub fn primary_button(text: impl Into<String>) -> egui::Button<'static> {
 pub fn secondary_button(text: impl Into<String>) -> egui::Button<'static> {
     let p = current();
     pill(
-        egui::Button::new(RichText::new(text.into()).color(p.text_primary)),
+        egui::Button::new(RichText::new(text.into()).font(fonts::medium(13.0)).color(p.text_primary)),
         p.neutral,
         84.0,
     )
@@ -517,7 +1108,7 @@ pub fn secondary_button(text: impl Into<String>) -> egui::Button<'static> {
 pub fn danger_button(text: impl Into<String>) -> egui::Button<'static> {
     let p = current();
     pill(
-        egui::Button::new(RichText::new(text.into()).color(Color32::WHITE).strong()),
+        egui::Button::new(RichText::new(text.into()).font(fonts::bold(13.0)).color(Color32::WHITE)),
         p.danger,
         84.0,
     )
@@ -527,97 +1118,16 @@ pub fn danger_button(text: impl Into<String>) -> egui::Button<'static> {
 pub fn ghost_button(text: impl Into<String>) -> egui::Button<'static> {
     let p = current();
     pill(
-        egui::Button::new(RichText::new(text.into()).color(p.text_secondary)),
+        egui::Button::new(RichText::new(text.into()).font(fonts::medium(13.0)).color(p.text_secondary)),
         p.surface_raised,
         64.0,
     )
 }
 
-pub fn add_button(text: impl Into<String>) -> egui::Button<'static> {
-    let p = current();
-    pill(
-        egui::Button::new(RichText::new(text.into()).color(p.on_accent).strong()),
-        p.accent,
-        96.0,
-    )
-    .stroke(Stroke::NONE)
-}
-
-/// Sidebar / tab navigation item styled after ytm-rs's pill nav rows.
-pub fn nav_item_button(
-    ui: &mut egui::Ui,
-    label: &str,
-    badge: Option<usize>,
-    active: bool,
-) -> egui::Response {
-    let p = current();
-    let width = ui.available_width().max(40.0);
-    let height = 38.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
-    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-
-    let bg = if active {
-        p.accent_soft
-    } else if resp.hovered() {
-        p.surface_hover
-    } else {
-        Color32::TRANSPARENT
-    };
-    let fg = if active {
-        p.accent
-    } else if resp.hovered() {
-        p.text_primary
-    } else {
-        p.text_secondary
-    };
-
-    let r = CornerRadius::same(p.radius_md.max(8));
-    if bg != Color32::TRANSPARENT {
-        ui.painter().rect_filled(rect, r, bg);
-    }
-    if active {
-        // Subtle left accent indicator bar (ytm-rs style)
-        let bar = Rect::from_min_size(
-            pos2(rect.left() + 3.0, rect.center().y - 9.0),
-            vec2(3.0, 18.0),
-        );
-        ui.painter()
-            .rect_filled(bar, CornerRadius::same(2), p.accent);
-    }
-
-    ui.painter().text(
-        pos2(rect.left() + 14.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        label,
-        egui::FontId::proportional(13.5),
-        fg,
-    );
-
-    if let Some(count) = badge.filter(|&n| n > 0) {
-        let count_str = count.to_string();
-        let pill_w = (count_str.len() as f32 * 7.5 + 14.0).max(24.0);
-        let pill_rect = Rect::from_center_size(
-            pos2(rect.right() - 12.0 - pill_w / 2.0, rect.center().y),
-            vec2(pill_w, 20.0),
-        );
-        ui.painter()
-            .rect_filled(pill_rect, CornerRadius::same(RADIUS_PILL), p.accent);
-        ui.painter().text(
-            pill_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            count_str,
-            egui::FontId::proportional(11.0),
-            p.on_accent,
-        );
-    }
-
-    resp
-}
-
-/// Smooth animated ytm-rs-style toggle switch tinted with the active accent color.
+/// Smooth animated toggle switch tinted with the active accent color.
 pub fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     let p = current();
-    let desired = vec2(44.0, 24.0);
+    let desired = vec2(42.0, 23.0);
     let (rect, mut resp) = ui.allocate_exact_size(desired, Sense::click());
     if resp.clicked() {
         *on = !*on;
@@ -627,33 +1137,31 @@ pub fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     let t = ui.ctx().animate_bool_responsive(resp.id, *on);
 
     let off_track = if p.light {
-        Color32::from_rgb(0xD2, 0xCE, 0xDA)
+        Color32::from_rgb(0xD4, 0xD4, 0xDE)
     } else {
-        Color32::from_rgb(0x3A, 0x35, 0x44)
+        Color32::from_rgb(0x32, 0x32, 0x42)
     };
     let track_fill = lerp_color(off_track, p.accent, t);
     let radius = rect.height() / 2.0;
 
     ui.painter().rect_filled(rect, radius, track_fill);
 
-    let knob_r = 9.0;
+    let knob_r = 8.5;
     let knob_x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), t);
     let knob_center = pos2(knob_x, rect.center().y);
     let knob_color = if *on { p.on_accent } else { Color32::WHITE };
     ui.painter()
-        .circle_filled(knob_center + vec2(0.0, 1.0), knob_r, Color32::from_black_alpha(40));
+        .circle_filled(knob_center + vec2(0.0, 1.0), knob_r, Color32::from_black_alpha(38));
     ui.painter().circle_filled(knob_center, knob_r, knob_color);
 
     resp
 }
 
-/// Subtle horizontal divider inside settings cards.
 pub fn divider(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
     ui.painter().rect_filled(rect, 0.0, divider_color());
 }
 
-/// Grouped settings card wrapper.
 pub fn settings_card(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
     settings_card_frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -661,8 +1169,6 @@ pub fn settings_card(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
     });
 }
 
-/// Responsive ytm-rs-style setting row: title + description on the left, control on the right.
-/// Automatically stacks vertically when available width is narrow (< 460 px).
 pub fn setting_row(
     ui: &mut egui::Ui,
     title: &str,
@@ -677,13 +1183,17 @@ pub fn setting_row(
         ui.vertical(|ui| {
             ui.label(
                 RichText::new(title)
-                    .size(14.0)
-                    .strong()
+                    .font(fonts::medium(14.0))
                     .color(text_primary()),
             );
             if let Some(d) = desc {
                 ui.add(
-                    egui::Label::new(RichText::new(d).size(12.0).color(text_secondary())).wrap(),
+                    egui::Label::new(
+                        RichText::new(d)
+                            .font(fonts::regular(12.0))
+                            .color(text_secondary()),
+                    )
+                    .wrap(),
                 );
             }
             ui.add_space(8.0);
@@ -693,19 +1203,22 @@ pub fn setting_row(
         });
     } else {
         ui.horizontal(|ui| {
-            let text_w = (avail * 0.56).clamp(180.0, 440.0);
+            let text_w = (avail * 0.58).clamp(180.0, 440.0);
             ui.vertical(|ui| {
                 ui.set_width(text_w);
                 ui.label(
                     RichText::new(title)
-                        .size(14.0)
-                        .strong()
+                        .font(fonts::medium(14.0))
                         .color(text_primary()),
                 );
                 if let Some(d) = desc {
                     ui.add(
-                        egui::Label::new(RichText::new(d).size(12.0).color(text_secondary()))
-                            .wrap(),
+                        egui::Label::new(
+                            RichText::new(d)
+                                .font(fonts::regular(12.0))
+                                .color(text_secondary()),
+                        )
+                        .wrap(),
                     );
                 }
             });
@@ -717,63 +1230,31 @@ pub fn setting_row(
     ui.add_space(6.0);
 }
 
-pub fn menu_secondary_button(text: impl Into<String>) -> egui::Button<'static> {
-    let p = current();
-    egui::Button::new(RichText::new(text.into()).size(13.5).color(p.text_primary))
-        .fill(p.surface_hover)
-        .stroke(Stroke::NONE)
-        .corner_radius(CornerRadius::same(p.radius_md))
-}
+pub fn menu_popup_pos(button: Rect, bounds: Rect, menu_height: f32) -> egui::Pos2 {
+    let width = MENU_WIDTH + 12.0;
+    let x = (button.right() - width).max(bounds.left() + SPACE_SM);
 
-pub fn menu_danger_button(text: impl Into<String>) -> egui::Button<'static> {
-    let p = current();
-    egui::Button::new(
-        RichText::new(text.into())
-            .size(13.5)
-            .strong()
-            .color(Color32::WHITE),
-    )
-    .fill(p.danger)
-    .stroke(Stroke::NONE)
-    .corner_radius(CornerRadius::same(p.radius_md))
-}
-
-pub fn menu_popup_pos(button: Rect, card: Rect, menu_height: f32) -> egui::Pos2 {
-    let width = MENU_WIDTH + 2.0 * SPACE_SM;
-    let x = (button.right() - width).max(card.left() + SPACE_XS);
-
-    let below = button.bottom() + SPACE_SM;
-    let y = if below + menu_height + SPACE_XS <= card.bottom() {
+    let below = button.bottom() + 6.0;
+    let y = if below + menu_height + SPACE_SM <= bounds.bottom() {
         below
     } else {
-        (button.top() - menu_height - SPACE_XS).max(card.top() + SPACE_XS)
+        (button.top() - menu_height - 6.0).max(bounds.top() + SPACE_SM)
     };
 
     pos2(x, y)
 }
 
-pub fn menu_toggle_button(open: bool) -> egui::Button<'static> {
-    let p = current();
-    let (fill, color, stroke) = if open {
-        (
-            p.accent_soft,
-            p.accent,
-            Stroke::new(1.0_f32, with_alpha(p.accent, 180)),
-        )
-    } else {
-        (p.surface_raised, p.text_secondary, Stroke::new(1.0_f32, p.border))
-    };
-    egui::Button::new(RichText::new("•••").size(15.0).color(color))
-        .fill(fill)
-        .stroke(stroke)
-        .corner_radius(CornerRadius::same(p.radius_md))
-        .min_size(vec2(34.0, 28.0))
-}
-
 // ─── Color Utilities ───────────────────────────────────────────────────────
+
+use eframe::egui::Vec2;
 
 pub fn with_alpha(color: Color32, alpha: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
+}
+
+pub fn scale_alpha(color: Color32, factor: f32) -> Color32 {
+    let a = ((color.a() as f32) * factor.clamp(0.0, 1.0)).round() as u8;
+    with_alpha(color, a)
 }
 
 pub fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
@@ -795,30 +1276,12 @@ pub fn darken(c: Color32, amount: f32) -> Color32 {
     lerp_color(c, Color32::BLACK, amount)
 }
 
-/// High-contrast foreground (white or near-black) for arbitrary background colors.
 pub fn contrast_on(bg: Color32) -> Color32 {
     let luma = 0.299 * bg.r() as f32 + 0.587 * bg.g() as f32 + 0.114 * bg.b() as f32;
     if luma > 155.0 {
-        Color32::from_rgb(18, 16, 22)
+        Color32::from_rgb(16, 16, 22)
     } else {
         Color32::WHITE
-    }
-}
-
-/// Subtle focus/hover highlight ring (refined ytm-rs style, gentler than heavy neon).
-pub fn draw_glow(ui: &egui::Ui, rect: Rect, corner_radius: u8, color: Color32) {
-    if !rect.is_finite() || rect.width() <= 1.0 || rect.height() <= 1.0 {
-        return;
-    }
-    let painter = ui.painter();
-    for (expand, alpha, width) in [(2.5_f32, 24_u8, 2.5_f32), (1.0_f32, 70_u8, 1.5_f32)] {
-        let radius = CornerRadius::same(corner_radius.saturating_add(expand as u8));
-        painter.rect_stroke(
-            rect.expand(expand),
-            radius,
-            Stroke::new(width, with_alpha(color, alpha)),
-            egui::StrokeKind::Outside,
-        );
     }
 }
 
@@ -833,34 +1296,6 @@ pub enum BadgeKind {
     Neutral,
 }
 
-pub fn badge_sized(
-    ui: &mut egui::Ui,
-    text: impl Into<String>,
-    kind: BadgeKind,
-    size: egui::Vec2,
-) -> egui::Response {
-    let (fg, bg) = badge_colors(kind);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
-    if rect.is_finite() && rect.width() > 0.0 && rect.height() > 0.0 {
-        let painter = ui.painter();
-        painter.rect_filled(rect, CornerRadius::same(RADIUS_PILL), bg);
-        painter.rect_stroke(
-            rect,
-            CornerRadius::same(RADIUS_PILL),
-            Stroke::new(1.0_f32, with_alpha(fg, 85)),
-            egui::StrokeKind::Inside,
-        );
-        painter.text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            text.into(),
-            egui::FontId::proportional(11.0),
-            fg,
-        );
-    }
-    response
-}
-
 fn badge_colors(kind: BadgeKind) -> (Color32, Color32) {
     let p = current();
     match kind {
@@ -872,36 +1307,27 @@ fn badge_colors(kind: BadgeKind) -> (Color32, Color32) {
     }
 }
 
-pub fn status_dot(ui: &mut egui::Ui, color: Color32) {
-    let avail = ui.available_size();
-    if !avail.x.is_finite() || !avail.y.is_finite() || avail.x < 8.0 || avail.y < 8.0 {
-        return;
-    }
-    let (rect, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
-    if rect.is_finite() && rect.width() > 0.0 && rect.height() > 0.0 {
-        ui.painter().circle_filled(rect.center(), 4.0, color);
-    }
-}
-
 pub fn muted_label(text: impl Into<String>) -> RichText {
-    RichText::new(text.into()).color(text_muted())
+    RichText::new(text.into())
+        .font(fonts::regular(12.5))
+        .color(text_muted())
 }
 
 pub fn secondary_label(text: impl Into<String>) -> RichText {
-    RichText::new(text.into()).color(text_secondary())
+    RichText::new(text.into())
+        .font(fonts::regular(13.0))
+        .color(text_secondary())
 }
 
 pub fn section_heading(text: impl Into<String>) -> RichText {
     RichText::new(text.into().to_uppercase())
-        .strong()
-        .size(11.0)
+        .font(fonts::bold(10.5))
         .color(text_muted())
 }
 
 pub fn field_label(text: impl Into<String>) -> RichText {
     RichText::new(text.into())
-        .strong()
-        .size(12.5)
+        .font(fonts::medium(12.5))
         .color(text_secondary())
 }
 
@@ -939,11 +1365,18 @@ mod tests {
         assert_eq!(p.accent, Color32::from_rgb(0x10, 0xB9, 0x81));
         assert_eq!(p.detail, Color32::from_rgb(0x38, 0xBD, 0xF8));
         assert_eq!(p.radius_lg, 16);
+        assert_eq!(p.border.a(), 255);
+        assert_eq!(p.border_hover.a(), 255);
+        assert_eq!(p.divider.a(), 255);
+        assert_eq!(p.specular.a(), 255);
     }
 
     #[test]
     fn contrast_picks_dark_text_on_bright_accent() {
-        assert_eq!(contrast_on(Color32::from_rgb(255, 240, 120)), Color32::from_rgb(18, 16, 22));
+        assert_eq!(
+            contrast_on(Color32::from_rgb(255, 240, 120)),
+            Color32::from_rgb(16, 16, 22)
+        );
         assert_eq!(contrast_on(Color32::from_rgb(40, 20, 80)), Color32::WHITE);
     }
 }

@@ -127,7 +127,7 @@ fn update_checks_respect_cooldown() {
 
     // With a GitHub token the cooldown is two minutes instead of five.
     assert_eq!(update_check_cooldown_secs(false), 5 * 60);
-    assert_eq!(update_check_cooldown_secs(true), 2 * 60);
+    assert_eq!(update_check_cooldown_secs(true), 60);
     assert_eq!(
         update_check_cooldown_remaining(Some(1_000), 1_060, 120),
         Some(60)

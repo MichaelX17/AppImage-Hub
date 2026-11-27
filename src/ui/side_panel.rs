@@ -5,11 +5,12 @@
 
 use crate::app::ManagerApp;
 use crate::ui::breakpoints::SizeClass;
-use crate::ui::theme;
+use crate::ui::icons::{self, Icon};
+use crate::ui::{fonts, theme};
 use eframe::egui::{self, Align, Color32, CornerRadius, Layout, Margin, RichText, Stroke};
 use std::path::Path;
 
-const FORM_INPUT_HEIGHT: f32 = 42.0;
+const FORM_INPUT_HEIGHT: f32 = 40.0;
 
 fn form_text_input(
     ui: &mut egui::Ui,
@@ -20,8 +21,13 @@ fn form_text_input(
     ui.add_sized(
         [width, FORM_INPUT_HEIGHT],
         egui::TextEdit::singleline(value)
-            .hint_text(RichText::new(hint).color(theme::with_alpha(theme::text_muted(), 180)))
-            .margin(Margin::symmetric(12, 10))
+            .font(fonts::regular(13.0))
+            .hint_text(
+                RichText::new(hint)
+                    .font(fonts::regular(13.0))
+                    .color(theme::with_alpha(theme::text_muted(), 180)),
+            )
+            .margin(Margin::symmetric(12, 9))
             .vertical_align(Align::Center)
             .desired_width(width),
     )
@@ -30,19 +36,18 @@ fn form_text_input(
 fn form_primary_button(text: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(
         RichText::new(text.into())
-            .size(15.0)
-            .strong()
+            .font(fonts::bold(14.0))
             .color(theme::on_accent()),
     )
     .fill(theme::accent())
     .stroke(Stroke::NONE)
-    .corner_radius(CornerRadius::same(theme::radius_md()))
+    .corner_radius(CornerRadius::same(theme::RADIUS_PILL))
 }
 
 fn form_secondary_button(text: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(
         RichText::new(text.into())
-            .size(13.0)
+            .font(fonts::medium(13.0))
             .color(theme::text_primary()),
     )
     .fill(theme::surface_raised())
@@ -53,12 +58,25 @@ fn form_secondary_button(text: impl Into<String>) -> egui::Button<'static> {
 fn form_ghost_button(text: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(
         RichText::new(text.into())
-            .size(13.0)
+            .font(fonts::medium(13.0))
             .color(theme::text_secondary()),
     )
     .fill(Color32::TRANSPARENT)
     .stroke(Stroke::NONE)
-    .corner_radius(CornerRadius::same(theme::radius_md()))
+    .corner_radius(CornerRadius::same(theme::RADIUS_PILL))
+}
+
+fn toggle_row(ui: &mut egui::Ui, value: &mut bool, label: &str) {
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(label)
+                .font(fonts::medium(13.0))
+                .color(theme::text_primary()),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            theme::toggle(ui, value);
+        });
+    });
 }
 
 #[derive(Default, Clone, PartialEq, Eq)]
@@ -194,15 +212,20 @@ pub fn render(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeClass) {
         "Add AppImage"
     };
 
+    let mut close_clicked = false;
     theme::panel_frame().show(ui, |ui| {
         ui.set_min_height(ui.available_height());
-        render_header(ui, title);
+        if render_header(ui, title, is_edit) {
+            close_clicked = true;
+        }
 
-        ui.add_space(theme::SPACE_LG);
+        ui.add_space(theme::SPACE_MD);
+        theme::divider(ui);
+        ui.add_space(theme::SPACE_MD);
 
         // Reserve enough room for the validation row, primary action, and the
         // secondary Cancel action at the bottom of the panel.
-        let footer_height = 128.0;
+        let footer_height = 122.0;
         let available = ui.available_height();
         let available = if available.is_finite() {
             available
@@ -258,24 +281,43 @@ pub fn render(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeClass) {
             close_editor(mgr);
         }
     });
+    if close_clicked {
+        close_editor(mgr);
+    }
 }
 
-fn render_header(ui: &mut egui::Ui, title: &str) {
-    ui.label(
-        RichText::new(title)
-            .size(28.0)
-            .strong()
-            .color(theme::text_primary()),
-    );
-    ui.add_space(theme::SPACE_XS);
+fn render_header(ui: &mut egui::Ui, title: &str, is_edit: bool) -> bool {
+    let mut closed = false;
+    ui.horizontal(|ui| {
+        icons::widget(
+            ui,
+            if is_edit { Icon::Edit } else { Icon::Plus },
+            20.0,
+            theme::accent(),
+        );
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(title)
+                .font(fonts::bold(21.0))
+                .color(theme::text_primary()),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if theme::icon_button(ui, Icon::Close, 28.0, false, "Close (Esc)").clicked() {
+                closed = true;
+            }
+        });
+    });
+    ui.add_space(2.0);
     ui.label(
         theme::secondary_label("Configure the AppImage source, metadata, and launch options.")
-            .size(13.0),
+            .font(fonts::regular(12.5)),
     );
+    closed
 }
 
 fn close_editor(mgr: &mut ManagerApp) {
     mgr.is_form_open = false;
+    mgr.show_side_panel = false;
     mgr.side_panel_form.clear();
 }
 pub fn render_add_to(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeClass) {
@@ -287,25 +329,36 @@ pub fn render_add_to(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeC
         return;
     };
 
+    let mut close_clicked = false;
     theme::panel_frame().show(ui, |ui| {
         ui.set_min_height(ui.available_height());
 
-        ui.label(
-            RichText::new("Add to…")
-                .size(28.0)
-                .strong()
-                .color(theme::text_primary()),
-        );
-        ui.add_space(theme::SPACE_XS);
+        ui.horizontal(|ui| {
+            icons::widget(ui, Icon::Link, 20.0, theme::accent());
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Manage Shortcuts")
+                    .font(fonts::bold(21.0))
+                    .color(theme::text_primary()),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if theme::icon_button(ui, Icon::Close, 28.0, false, "Close (Esc)").clicked() {
+                    close_clicked = true;
+                }
+            });
+        });
+        ui.add_space(2.0);
         ui.label(
             theme::secondary_label(format!(
                 "Choose where to create shortcuts for {}.",
                 state.app_name
             ))
-            .size(13.0),
+            .font(fonts::regular(12.5)),
         );
 
-        ui.add_space(theme::SPACE_LG);
+        ui.add_space(theme::SPACE_MD);
+        theme::divider(ui);
+        ui.add_space(theme::SPACE_MD);
         ui.label(theme::section_heading("Targets"));
         ui.add_space(theme::SPACE_SM);
 
@@ -314,6 +367,7 @@ pub fn render_add_to(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeC
 
         if let Some(p) = &desktop_path {
             shortcut_target(ui, "Desktop shortcut", p);
+            ui.add_space(6.0);
         }
         if let Some(p) = &menu_path {
             shortcut_target(ui, "Start menu entry", p);
@@ -322,23 +376,23 @@ pub fn render_add_to(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeC
         ui.add_space(theme::SPACE_LG);
         ui.label(theme::section_heading("Shortcuts"));
         ui.add_space(theme::SPACE_SM);
-        ui.checkbox(&mut state.desktop, "Desktop shortcut");
-        ui.add_space(theme::SPACE_XS);
-        ui.checkbox(&mut state.menu, "Start menu entry");
+        toggle_row(ui, &mut state.desktop, "Desktop shortcut");
+        ui.add_space(theme::SPACE_SM);
+        toggle_row(ui, &mut state.menu, "Start menu entry");
         ui.add_space(theme::SPACE_SM);
         ui.label(
-            theme::muted_label("Checked = create/keep. Unchecked = remove if present.").size(11.0),
+            theme::muted_label("Enabled = create/keep. Disabled = remove if present.")
+                .font(fonts::regular(11.5)),
         );
 
         mgr.add_to = Some(state);
 
-        // Keep the actions anchored at the bottom, matching the main form.
         ui.add_space((ui.available_height() - 94.0).max(theme::SPACE_LG));
         let button_width = ui.available_width();
         if ui
             .add_sized(
-                [button_width, FORM_INPUT_HEIGHT + 4.0],
-                form_primary_button("Apply"),
+                [button_width, FORM_INPUT_HEIGHT + 2.0],
+                form_primary_button("Apply Shortcuts"),
             )
             .clicked()
         {
@@ -352,6 +406,9 @@ pub fn render_add_to(ui: &mut egui::Ui, mgr: &mut ManagerApp, _size_class: SizeC
             mgr.close_add_to();
         }
     });
+    if close_clicked {
+        mgr.close_add_to();
+    }
 }
 
 fn shortcut_target(ui: &mut egui::Ui, label: &str, path: &Path) {
@@ -513,7 +570,8 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
     );
     ui.add_space(theme::SPACE_SM);
 
-    ui.checkbox(
+    toggle_row(
+        ui,
         &mut mgr.side_panel_form.startup_notify,
         "Enable launch feedback (StartupNotify)",
     );
@@ -542,12 +600,13 @@ fn render_form_fields(ui: &mut egui::Ui, mgr: &mut ManagerApp) {
     ui.add_space(theme::SPACE_LG);
     ui.label(theme::section_heading("Shortcuts"));
     ui.add_space(theme::SPACE_SM);
-    ui.checkbox(
+    toggle_row(
+        ui,
         &mut mgr.side_panel_form.desktop_shortcut,
         "Desktop shortcut",
     );
-    ui.add_space(theme::SPACE_XS);
-    ui.checkbox(&mut mgr.side_panel_form.menu_entry, "Start menu entry");
+    ui.add_space(theme::SPACE_SM);
+    toggle_row(ui, &mut mgr.side_panel_form.menu_entry, "Start menu entry");
     ui.add_space(theme::SPACE_SM);
     ui.label(theme::field_label("MIME types / URI schemes (optional)"));
     form_text_input(
@@ -921,10 +980,10 @@ fn segment_button(label: &str, selected: bool) -> egui::Button<'static> {
             Stroke::new(1.0_f32, theme::border()),
         )
     };
-    egui::Button::new(RichText::new(label).size(13.0).strong().color(color))
+    egui::Button::new(RichText::new(label).font(fonts::medium(12.5)).color(color))
         .fill(fill)
         .stroke(stroke)
-        .corner_radius(CornerRadius::same(theme::radius_md()))
+        .corner_radius(CornerRadius::same(theme::RADIUS_PILL))
 }
 fn validation_message(form: &SidePanelFormState) -> Option<&'static str> {
     if form.display_name.trim().is_empty() {

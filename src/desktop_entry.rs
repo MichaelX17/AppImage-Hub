@@ -457,24 +457,35 @@ pub fn sync_hub_shortcuts(create_menu: bool, create_desktop: bool, start_menu_ca
 
     if let Ok(apps_dir) = xdg::applications_dir() {
         let path = apps_dir.join("appimage-hub.desktop");
+        let mut changed = false;
         if create_menu {
-            let _ = std::fs::create_dir_all(&apps_dir);
-            let _ = std::fs::write(&path, &content);
-            let _ = set_entry_permissions(&path);
-        } else {
+            let existing = std::fs::read_to_string(&path).ok();
+            if existing.as_deref() != Some(content.as_str()) {
+                let _ = std::fs::create_dir_all(&apps_dir);
+                let _ = std::fs::write(&path, &content);
+                let _ = set_entry_permissions(&path);
+                changed = true;
+            }
+        } else if path.exists() {
             let _ = std::fs::remove_file(&path);
+            changed = true;
         }
-        refresh_menu_cache(&apps_dir);
+        if changed {
+            refresh_menu_cache(&apps_dir);
+        }
     }
 
     if let Ok(desktop_dir) = xdg::desktop_dir() {
         let path = desktop_dir.join("appimage-hub.desktop");
         if create_desktop {
-            let _ = std::fs::create_dir_all(&desktop_dir);
-            let _ = std::fs::write(&path, &content);
-            let _ = set_entry_permissions(&path);
-            mark_trusted_async(path.clone());
-        } else {
+            let existing = std::fs::read_to_string(&path).ok();
+            if existing.as_deref() != Some(content.as_str()) {
+                let _ = std::fs::create_dir_all(&desktop_dir);
+                let _ = std::fs::write(&path, &content);
+                let _ = set_entry_permissions(&path);
+                mark_trusted_async(path.clone());
+            }
+        } else if path.exists() {
             let _ = std::fs::remove_file(&path);
         }
     }

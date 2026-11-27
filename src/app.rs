@@ -181,6 +181,13 @@ pub enum ChecksumStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewMode {
+    #[default]
+    Grid,
+    List,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NavFilter {
     #[default]
     All,
@@ -235,7 +242,7 @@ impl AppSortBy {
 /// Update-check cooldown without a GitHub token (60 requests/hour limit).
 const UPDATE_CHECK_COOLDOWN_SECS: u64 = 5 * 60;
 /// Update-check cooldown with a GitHub token (5,000 requests/hour limit).
-const AUTHENTICATED_UPDATE_CHECK_COOLDOWN_SECS: u64 = 2 * 60;
+const AUTHENTICATED_UPDATE_CHECK_COOLDOWN_SECS: u64 = 60;
 
 /// Bound on establishing a connection to the GitHub API.
 pub(crate) const API_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -381,7 +388,9 @@ pub struct ManagerApp {
     pub(crate) show_settings: bool,
     pub(crate) settings_form: crate::ui::settings_panel::SettingsFormState,
     pub(crate) nav_filter: NavFilter,
+    pub(crate) view_mode: ViewMode,
     pub(crate) search_query: String,
+    pub(crate) palette: crate::ui::palette::CommandPalette,
     /// True until the user picks where AppImages should be stored.
     first_run_setup: bool,
     /// When the last GitHub update check completed (drives the footer label).
@@ -408,14 +417,18 @@ pub struct ManagerApp {
     /// Local (offline) per-app file problems, refreshed periodically.
     pub(crate) file_issues: HashMap<String, LocalFileIssue>,
     /// Cached app list and sort metadata, rebuilt only on config writes.
-    snapshot: AppSnapshotCache,
+    pub(crate) snapshot: AppSnapshotCache,
     /// Background file scanner channels.
     scan_tx: std::sync::mpsc::Sender<Vec<FileScanSpec>>,
     scan_rx: std::sync::mpsc::Receiver<FileScanBatch>,
     scan_seq: u64,
-    /// Startup icon repair / sidecar sync is deferred past the first frame.
-    startup_scan_pending: bool,
-    startup_scan_started: bool,
+    /// Background startup initialization (keyring/Argon2id token, shortcut sync, temp cleanup).
+    pub(crate) startup_init_rx: Option<std::sync::mpsc::Receiver<snapshot::StartupInitOutcome>>,
+    pub(crate) startup_init_done: bool,
+    /// Background storage scan (icon/WMClass repair, filename normalization, sidecar sync).
+    pub(crate) startup_scan_rx: Option<std::sync::mpsc::Receiver<snapshot::StartupScanOutcome>>,
+    /// Async token fetch when opening the Settings screen.
+    pub(crate) settings_token_rx: Option<std::sync::mpsc::Receiver<String>>,
 }
 
 /// Result of reconciling per-AppImage sidecars with `config.toml`.
@@ -459,6 +472,7 @@ impl MetadataSyncReport {
 
 pub fn setup_custom_style(ctx: &egui::Context) {
     egui_extras::install_image_loaders(ctx);
+    crate::ui::fonts::install(ctx);
     crate::ui::theme::apply(ctx);
 }
 
@@ -477,56 +491,46 @@ impl ManagerApp {
         crate::ui::theme::apply_theme(&cc.egui_ctx, &loaded_config.theme);
         let config = Arc::new(Mutex::new(loaded_config));
 
-        // Do not act on default settings derived from an unreadable config:
-        // wait until the user has seen the warning and chosen a storage folder.
-        if config_warning.is_none() {
-            if let Ok(cfg) = config.lock() {
-                desktop_entry::sync_hub_shortcuts(
-                    cfg.hub_start_menu_shortcut,
-                    cfg.hub_desktop_shortcut,
-                    &cfg.hub_start_menu_category,
-                );
-            }
-        }
-
         let side_panel_width = cc
             .storage
             .and_then(|s| s.get_string("side_panel_width"))
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(420.0)
             .clamp(360.0, 520.0);
-        let show_side_panel = true;
-        let is_form_open = true;
+        let show_side_panel = false;
+        let is_form_open = false;
         let first_run_setup = config
             .lock()
             .map(|cfg| cfg.custom_download_dir.is_none() && cfg.applications.is_empty())
             .unwrap_or(true);
         let (cmd_tx, cmd_rx) = mpsc::channel::<BackendCommand>(64);
         let (evt_tx, evt_rx) = mpsc::channel::<BackendEvent>(256);
-        let token_report = crate::secrets::load_github_token_report();
-        let token_warning = if token_report.warnings.is_empty() {
-            None
-        } else {
-            Some(token_report.warnings.join(" "))
-        };
-        let github_token = token_report.token.or_else(|| {
-            std::env::var("GITHUB_TOKEN")
-                .ok()
-                .or_else(|| std::env::var("GH_TOKEN").ok())
-                .filter(|token| !token.trim().is_empty())
-        });
-        let has_github_token = token_is_present(github_token.as_deref());
-        crate::backend::spawn_backend(config.clone(), cmd_rx, evt_tx, github_token);
+
+        // Only read cheap env vars synchronously; OS keyring (D-Bus) + Argon2id
+        // decryption, shortcut sync, and stale-temp cleanup run on a background
+        // thread so Frame 1 paints instantaneously with zero UI freeze.
+        let env_token = std::env::var("GITHUB_TOKEN")
+            .ok()
+            .or_else(|| std::env::var("GH_TOKEN").ok())
+            .filter(|token| !token.trim().is_empty());
+        let has_github_token = token_is_present(env_token.as_deref());
+        crate::backend::spawn_backend(config.clone(), cmd_rx, evt_tx, env_token);
         let (scan_tx, scan_rx) = snapshot::spawn_file_scanner();
 
-        // Remove abandoned partial downloads from previous runs (older than an
-        // hour; never an `.appimage` file).
-        if let Ok(cfg) = config.lock() {
-            let roots = crate::storage::roots(&cfg);
-            drop(cfg);
-            let _ =
-                crate::downloader::cleanup_stale_temp_files(&roots, Duration::from_secs(60 * 60));
-        }
+        let startup_init_rx = Some(snapshot::spawn_startup_init(
+            config.clone(),
+            config_warning.is_none(),
+            cc.egui_ctx.clone(),
+        ));
+        let startup_scan_rx = if !first_run_setup {
+            Some(snapshot::spawn_startup_scan(
+                config.clone(),
+                false,
+                cc.egui_ctx.clone(),
+            ))
+        } else {
+            None
+        };
 
         let mut app = Self {
             config,
@@ -536,7 +540,7 @@ impl ManagerApp {
             failed_ops: Vec::new(),
             status: None,
             config_warning,
-            token_warning,
+            token_warning: None,
             pending_delete: None,
             pending_storage_change: None,
             update_available: HashMap::new(),
@@ -549,7 +553,9 @@ impl ManagerApp {
             show_settings: false,
             settings_form: crate::ui::settings_panel::SettingsFormState::default(),
             nav_filter: NavFilter::All,
+            view_mode: ViewMode::Grid,
             search_query: String::new(),
+            palette: crate::ui::palette::CommandPalette::default(),
             first_run_setup,
             last_checked: None,
             auto_check_done: false,
@@ -569,15 +575,12 @@ impl ManagerApp {
             scan_tx,
             scan_rx,
             scan_seq: 0,
-            startup_scan_pending: false,
-            startup_scan_started: false,
+            startup_init_rx,
+            startup_init_done: false,
+            startup_scan_rx,
+            settings_token_rx: None,
         };
         app.refresh_apps_snapshot();
-        if !app.first_run_setup {
-            // Paint the first frame before the (possibly slow) storage scan.
-            app.startup_scan_pending = true;
-            app.status = Some("Scanning storage…".into());
-        }
         app.refresh_file_issues();
         app
     }
@@ -693,5 +696,24 @@ impl ManagerApp {
 
     pub(crate) fn is_right_panel_open(&self) -> bool {
         !self.show_settings && (self.is_form_open || self.add_to.is_some())
+    }
+
+    /// Instant one-click Dark / Light toggle (persisted immediately to config.toml).
+    pub(crate) fn toggle_theme_mode(&mut self, ctx: &egui::Context) {
+        let next = if let Ok(mut cfg) = self.config.lock() {
+            cfg.theme.mode = match cfg.theme.mode {
+                crate::config::ThemeMode::Dark => crate::config::ThemeMode::Light,
+                crate::config::ThemeMode::Light => crate::config::ThemeMode::Dark,
+            };
+            let theme = cfg.theme.clone();
+            let _ = cfg.save();
+            Some(theme)
+        } else {
+            None
+        };
+        if let Some(theme) = next {
+            self.settings_form.theme.mode = theme.mode;
+            crate::ui::theme::apply_theme(ctx, &theme);
+        }
     }
 }
